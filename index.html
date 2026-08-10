@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BoomBug</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <h1>🐛 BoomBug</h1>
+  <p class="subtitle">Guide your bugs across the canvas. Press <kbd>Space</kbd> (or tap a bug) to <strong>BOOM</strong> it and paint surrounding pixels!</p>
+
+  <div id="hud">
+    <span>Bugs: <span id="bug-count">0</span></span>
+    <span>Painted: <span id="painted-count">0</span> / <span id="total-count">0</span></span>
+    <span>Booms left: <span id="boom-count">0</span></span>
+  </div>
+
+  <div id="canvas-wrapper">
+    <canvas id="game-canvas"></canvas>
+    <canvas id="overlay-canvas"></canvas>
+  </div>
+
+  <div id="controls">
+    <button id="btn-add-bug">➕ Add Bug</button>
+    <button id="btn-boom">💥 Boom Selected</button>
+    <button id="btn-reset">🔄 Reset</button>
+  </div>
+
+  <div id="message" class="hidden">🎉 Image Complete! All pixels painted!</div>
+
+  <script src="game.js"></script>
+</body>
+</html>
