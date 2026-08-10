@@ -78,6 +78,9 @@
     return dirs[Math.floor(Math.random() * dirs.length)];
   }
 
+  // Precompute constant derived from the static TARGET array.
+  const TOTAL_TARGET = TARGET.flat().reduce((s, v) => s + v, 0);
+
   // ── Init ──────────────────────────────────────────────────────────────────
   function init() {
     painted = Array.from({length: ROWS}, () => Array(COLS).fill(null));
@@ -92,9 +95,6 @@
     updateHUD();
     drawAll();
     startTick();
-    // Click/tap on overlay canvas to select bug
-    overlay.addEventListener('click', onCanvasClick);
-    overlay.style.pointerEvents = 'auto';
   }
 
   // ── Tick ──────────────────────────────────────────────────────────────────
@@ -269,10 +269,9 @@
   function updateHUD() {
     document.getElementById('bug-count').textContent = bugs.length;
     document.getElementById('boom-count').textContent = boomCount;
-    const totalTarget = TARGET.flat().reduce((s, v) => s + v, 0);
     const paintedCount = painted.flat().filter(v => v !== null).length;
     document.getElementById('painted-count').textContent = paintedCount;
-    document.getElementById('total-count').textContent = totalTarget;
+    document.getElementById('total-count').textContent = TOTAL_TARGET;
   }
 
   // ── Win check ─────────────────────────────────────────────────────────────
@@ -333,10 +332,13 @@
   });
 
   document.getElementById('btn-reset').addEventListener('click', () => {
-    overlay.removeEventListener('click', onCanvasClick);
     clearInterval(tickTimer);
     init();
   });
+
+  // Register the canvas click listener once, outside of init().
+  overlay.style.pointerEvents = 'auto';
+  overlay.addEventListener('click', onCanvasClick);
 
   // ── Start ─────────────────────────────────────────────────────────────────
   init();
