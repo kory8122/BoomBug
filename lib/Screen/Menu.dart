@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:boombug/Screen/Game.dart';
 
 class BoomBugSettingsButton extends StatelessWidget {
   final VoidCallback? onPressed;
@@ -88,21 +89,13 @@ class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
       end: 0.92,
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
-    _settingsScaleAnimation = Tween<double>(
-      begin: 1.0,
-      end: 0.92,
-    ).animate(CurvedAnimation(
-      parent: _settingsController,
-      curve: Curves.easeInOut,
-    ));
+    _settingsScaleAnimation = Tween<double>(begin: 1.0, end: 0.92).animate(
+      CurvedAnimation(parent: _settingsController, curve: Curves.easeInOut),
+    );
 
-    _logoScaleAnimation = Tween<double>(
-      begin: 1.0,
-      end: 1.03,
-    ).animate(CurvedAnimation(
-      parent: _logoController,
-      curve: Curves.easeInOut,
-    ));
+    _logoScaleAnimation = Tween<double>(begin: 1.0, end: 1.03).animate(
+      CurvedAnimation(parent: _logoController, curve: Curves.easeInOut),
+    );
 
     _bgAnimation = Tween<double>(
       begin: 0.0,
@@ -217,6 +210,9 @@ class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
                             GestureDetector(
                               onTap: () {
                                 _animateButton();
+                                Navigator.of(context).pushReplacement(
+                                  MaterialPageRoute(builder: (_) => Game()),
+                                );
                               },
                               child: ScaleTransition(
                                 scale: _scaleAnimation,
