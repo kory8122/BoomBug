@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:boombug/Screen/Game.dart';
+import 'package:boombug/widgets/animated_image_button.dart';
 
 class BoomBugSettingsButton extends StatelessWidget {
   final VoidCallback? onPressed;
@@ -122,6 +123,54 @@ class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
     await _settingsController.reverse();
   }
 
+  Widget _buildStatusChip({
+    required IconData icon,
+    required String value,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8CF),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFFFC700), width: 3),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0xFFFF7A00),
+            offset: Offset(0, 4),
+            blurRadius: 0,
+          ),
+          BoxShadow(
+            color: Color(0xFF174A9C),
+            offset: Offset(0, 2),
+            blurRadius: 2,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.18),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, size: 15, color: color),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Color(0xFF3A2A5E),
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     const Color background = Color(0xFF4E2B78);
@@ -178,15 +227,44 @@ class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
                     Positioned(
                       top: 8,
                       left: 8,
-                      child: GestureDetector(
-                        onTap: () {
-                          _animateSettingsButton();
-                          print('Settings button');
-                        },
-                        child: ScaleTransition(
-                          scale: _settingsScaleAnimation,
-                          child: BoomBugSettingsButton(),
-                        ),
+                      right: 8,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          GestureDetector(
+                            onTap: () {
+                              _animateSettingsButton();
+                              print('Settings button');
+                            },
+                            child: ScaleTransition(
+                              scale: _settingsScaleAnimation,
+                              child: AnimatedImageButton(
+                                width: 52,
+                                height: 52,
+                                imagePath: 'assets/icons/settings_icon.png',
+                                fit: BoxFit.cover,
+                                borderRadius: BorderRadius.circular(30),
+                                shadowColor: const Color(0xFFFFC700),
+                                shadowBlurRadius: 20,
+                              ),
+                            ),
+                          ),
+                          Row(
+                            children: [
+                              _buildStatusChip(
+                                icon: Icons.favorite,
+                                value: '3',
+                                color: const Color(0xFFFF5D5D),
+                              ),
+                              const SizedBox(width: 8),
+                              _buildStatusChip(
+                                icon: Icons.monetization_on,
+                                value: '120',
+                                color: const Color(0xFFFFC700),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
                     Center(
