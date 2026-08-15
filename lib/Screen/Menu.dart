@@ -239,12 +239,13 @@ class _MenuScreenState extends State<MenuScreen> with TickerProviderStateMixin {
                             child: ScaleTransition(
                               scale: _settingsScaleAnimation,
                               child: AnimatedImageButton(
-                                width: 52,
-                                height: 52,
-                                imagePath: 'assets/icons/settings_icon.png',
+                                width: 45,
+                                height: 45,
+                                imagePath: 'assets/icons/Setting_icon.png',
                                 fit: BoxFit.cover,
                                 borderRadius: BorderRadius.circular(30),
                                 shadowColor: const Color(0xFFFFC700),
+
                                 shadowBlurRadius: 20,
                               ),
                             ),
