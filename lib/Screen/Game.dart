@@ -26,6 +26,8 @@ class _GameState extends State<Game> {
   bool _isGameLost = false;
   Timer? _gameTimer;
 
+  static const _GridPoint _returnHole = _GridPoint(7, 10);
+
   static const List<Color> _palette = [
     Color(0xFFF44336),
     Color(0xFF4CAF50),
@@ -200,10 +202,13 @@ class _GameState extends State<Game> {
     if (stats == null || batch.remainingBugs == 0 || target == null) return;
 
     final slotIndex = _selectedSlots.indexOf(batch);
-    final source = _GridPoint(
-      ((slotIndex + 0.5) * 14 / _middleSlotCount).round(),
-      10,
-    );
+    const boardWidth = 400.0;
+    const slotWidth = 50.0;
+    const slotMargin = 4.0;
+    final slotCenter =
+        boardWidth / 2 +
+        (slotIndex - (_middleSlotCount - 1) / 2) * (slotWidth + slotMargin * 2);
+    final source = _GridPoint((slotCenter / boardWidth * 14 - 0.5).round(), 12);
     target.targeted = true;
     batch.releasedBugs++;
     stats.releasedBugs++;
@@ -219,7 +224,10 @@ class _GameState extends State<Game> {
   }
 
   List<_GridPoint>? _findRoute(_PixelData target, _GridPoint start) {
-    final destination = _GridPoint(target.column, target.row);
+    return _findRouteTo(_GridPoint(target.column, target.row), start);
+  }
+
+  List<_GridPoint>? _findRouteTo(_GridPoint destination, _GridPoint start) {
     final queue = <_GridPoint>[start];
     final previous = <_GridPoint, _GridPoint?>{start: null};
     const directions = [
@@ -258,7 +266,9 @@ class _GameState extends State<Game> {
 
   bool _canBugEnter(_GridPoint point, _GridPoint destination) {
     if (point == destination) return true;
-    if (point.row == 10) return point.column >= 0 && point.column < 14;
+    if (point.row >= 10 && point.row <= 12) {
+      return point.column >= 0 && point.column < 14;
+    }
     if (point.column < 0 ||
         point.column >= 14 ||
         point.row < 0 ||
@@ -285,6 +295,7 @@ class _GameState extends State<Game> {
       if (batch.remainingBugs == 0 && batch.activeBugs == 0) {
         _selectedSlots[_selectedSlots.indexOf(batch)] = null;
         _spawnCooldowns.remove(batch);
+        hasChanges = true;
       } else if (cooldown <= 0) {
         _spawnBug(batch);
         _spawnCooldowns[batch] = 0.16;
@@ -310,7 +321,10 @@ class _GameState extends State<Game> {
             _colorStats[bug.color]!.destroyedPixels++;
           }
           bug.state = _BugState.returning;
-          bug.route = bug.route!.reversed.toList();
+          bug.route = _findRouteTo(
+            _returnHole,
+            _GridPoint(bug.target.column, bug.target.row),
+          );
           bug.progress = 0;
         } else {
           bug.hasReturned = true;
@@ -348,19 +362,14 @@ class _GameState extends State<Game> {
 
   BoxDecoration _boardDecoration() {
     return BoxDecoration(
-      color: const Color(0xFF087FAF),
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: const Color(0xFFFFD35C), width: 4),
+      color: Colors.white.withValues(alpha: 0.82),
+      border: Border.all(color: Colors.white, width: 4),
+      borderRadius: BorderRadius.circular(10),
       boxShadow: const [
         BoxShadow(
-          color: Color(0xFF4A2717),
-          offset: Offset(0, 6),
+          color: Color(0x55000000),
+          offset: Offset(5, 5),
           blurRadius: 0,
-        ),
-        BoxShadow(
-          color: Color(0x9900173A),
-          blurRadius: 8,
-          offset: Offset(0, 3),
         ),
       ],
     );
@@ -369,18 +378,29 @@ class _GameState extends State<Game> {
   BoxDecoration _slotDecoration(Color? color, {required bool active}) {
     final fill = color ?? const Color(0xFF79421F);
     return BoxDecoration(
-      color: fill,
-      borderRadius: BorderRadius.circular(8),
-      border: Border.all(
-        color: active ? const Color(0xFFFFED9A) : const Color(0xFFD99535),
-        width: 3,
+      gradient: LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          Color.lerp(fill, Colors.white, 0.18)!,
+          fill,
+          Color.lerp(fill, Colors.black, 0.12)!,
+        ],
       ),
+      borderRadius: BorderRadius.circular(13),
+      border: Border.all(color: Colors.white.withValues(alpha: 0.4), width: 3),
       boxShadow: [
         const BoxShadow(
-          color: Color(0xFF4A2717),
-          offset: Offset(0, 4),
-          blurRadius: 0,
+          color: Color(0x55000000),
+          blurRadius: 5,
+          offset: Offset(0, 3),
         ),
+        if (!active)
+          const BoxShadow(
+            color: Color(0x99000000),
+            offset: Offset(0, 5),
+            blurRadius: 0,
+          ),
         if (active)
           BoxShadow(
             color: fill.withValues(alpha: 0.55),
@@ -389,6 +409,19 @@ class _GameState extends State<Game> {
           ),
       ],
     );
+  }
+
+  String _bugImagePath(Color color) {
+    const bugImages = {
+      0xFFF44336: 'assets/bugs/red.png',
+      0xFF4CAF50: 'assets/bugs/green.png',
+      0xFF2196F3: 'assets/bugs/blue.png',
+      0xFFFFFFFF: 'assets/bugs/white.png',
+      0xFF212121: 'assets/bugs/black.png',
+      0xFFFFD740: 'assets/bugs/yellow.png',
+      0xFFE91E63: 'assets/bugs/pink.png',
+    };
+    return bugImages[color.toARGB32()] ?? 'assets/bugs/red.png';
   }
 
   @override
@@ -448,7 +481,6 @@ class _GameState extends State<Game> {
                   child: Container(
                     width: 400,
                     height: 300,
-                    clipBehavior: Clip.antiAlias,
                     decoration: _boardDecoration(),
                     child: LayoutBuilder(
                       builder: (context, constraints) {
@@ -492,7 +524,7 @@ class _GameState extends State<Game> {
                 ),
               ),
               Positioned(
-                bottom: 300,
+                bottom: 260,
                 left: 0,
                 right: 0,
                 child: Center(
@@ -530,7 +562,7 @@ class _GameState extends State<Game> {
                 ),
               ),
               Positioned(
-                bottom: 170,
+                bottom: 120,
                 left: 0,
                 right: 0,
                 child: Center(
@@ -562,21 +594,74 @@ class _GameState extends State<Game> {
                             ),
                             child: batch == null
                                 ? null
-                                : Center(
-                                    child: Text(
-                                      '${batch.remainingBugs}',
-                                      style: TextStyle(
-                                        color: color!.computeLuminance() > 0.6
-                                            ? Colors.black
-                                            : Colors.white,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.bold,
+                                : Stack(
+                                    children: [
+                                      Center(
+                                        child: Image.asset(
+                                          _bugImagePath(batch.color),
+                                          width: 34,
+                                          height: 34,
+                                          fit: BoxFit.contain,
+                                        ),
                                       ),
-                                    ),
+                                      Positioned(
+                                        right: 1,
+                                        bottom: 1,
+                                        child: Text(
+                                          '${batch.remainingBugs}',
+                                          style: TextStyle(
+                                            color:
+                                                color!.computeLuminance() > 0.6
+                                                ? Colors.black
+                                                : Colors.white,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                      if (!isQueueFront)
+                                        Positioned.fill(
+                                          child: IgnorePointer(
+                                            child: Container(
+                                              decoration: BoxDecoration(
+                                                color: const Color(0x66000000),
+                                                borderRadius:
+                                                    BorderRadius.circular(5),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                    ],
                                   ),
                           ),
                         );
                       }),
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                bottom: 340,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF24150F),
+                      borderRadius: BorderRadius.circular(50),
+                      border: Border.all(
+                        color: const Color(0xFF9B5B2A),
+                        width: 3,
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x9900173A),
+                          blurRadius: 5,
+                          offset: Offset(0, 3),
+                        ),
+                      ],
                     ),
                   ),
                 ),
