@@ -1,10 +1,12 @@
 import 'dart:async';
-import 'dart:math' show Random, atan2, min, pi;
+import 'dart:math' show Random, atan2, pi;
+import 'dart:ui' as ui;
 
 import 'package:boombug/Screen/Menu.dart';
 import 'package:boombug/widgets/animated_image_button.dart';
 import 'package:boombug/widgets/custom_icon_button.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 class Game extends StatefulWidget {
   const Game({super.key});
@@ -14,9 +16,17 @@ class Game extends StatefulWidget {
 }
 
 class _GameState extends State<Game> {
+  static const int _gridColumns = 36;
+  static const int _gridRows = 27;
+  static const int _maximumActiveBugs = 15;
+
   int currentLevel = 1;
+  int currentAnimalId = 1;
+  int? previousAnimalId;
   final int totalLevels = 5;
+  final Random _animalRandom = Random();
   final List<_PixelData> _pixels = [];
+  final Set<_GridPoint> _occupiedCells = {};
   final List<_BugData> _activeBugs = [];
   final List<_BugBatch?> _selectedSlots = List<_BugBatch?>.filled(5, null);
   final List<_BugBatch> _availableBatches = [];
@@ -24,80 +34,9 @@ class _GameState extends State<Game> {
   final Map<_BugBatch, double> _spawnCooldowns = {};
   int _middleSlotCount = 3;
   bool _isGameLost = false;
+  String? _levelLoadError;
+  int _levelLoadToken = 0;
   Timer? _gameTimer;
-
-  static const _GridPoint _returnHole = _GridPoint(7, 10);
-
-  static const List<Color> _palette = [
-    Color(0xFFF44336),
-    Color(0xFF4CAF50),
-    Color(0xFF2196F3),
-    Color(0xFFFFFFFF),
-    Color(0xFF212121),
-  ];
-
-  static const List<List<String>> _animalPatterns = [
-    [
-      '...##....##...',
-      '...###..###...',
-      '..##########..',
-      '.############.',
-      '.############.',
-      '.###.####.###.',
-      '.############.',
-      '..##########..',
-      '..##......##..',
-      '.##........##.',
-    ],
-    [
-      '..............',
-      '....####......',
-      '..########....',
-      '.###########..',
-      '#############.',
-      '.###########..',
-      '..########....',
-      '....####......',
-      '.....#..#.....',
-      '..............',
-    ],
-    [
-      '..............',
-      '.....###......',
-      '....#####.....',
-      '..#########...',
-      '.###########..',
-      '..###########.',
-      '....#########.',
-      '......#####...',
-      '.......###....',
-      '..............',
-    ],
-    [
-      '....##..##....',
-      '....##..##....',
-      '...########...',
-      '..##########..',
-      '..##########..',
-      '..###.##.###..',
-      '..##########..',
-      '...########...',
-      '....##..##....',
-      '...##....##...',
-    ],
-    [
-      '..............',
-      '....######....',
-      '..##########..',
-      '.############.',
-      '.############.',
-      '.############.',
-      '..##########..',
-      '...##.##.##...',
-      '..##..##..##..',
-      '..............',
-    ],
-  ];
 
   @override
   void initState() {
@@ -113,43 +52,151 @@ class _GameState extends State<Game> {
   }
 
   void _startLevel() {
-    _pixels
-      ..clear()
-      ..addAll(_generateAnimal(currentLevel));
+    final animalId = _selectAnimalId();
+    final loadToken = ++_levelLoadToken;
+
+    _pixels.clear();
+    _occupiedCells.clear();
     _activeBugs.clear();
     _selectedSlots.fillRange(0, _selectedSlots.length, null);
     _availableBatches.clear();
     _spawnCooldowns.clear();
+    _colorStats.clear();
     _isGameLost = false;
+    _levelLoadError = null;
     _middleSlotCount = 3 + ((currentLevel - 1) % 3);
-    _colorStats
-      ..clear()
-      ..addEntries(
-        _countPixelsByColor(_pixels).entries.map(
-          (entry) => MapEntry(
-            entry.key,
-            _ColorStats(originalPixels: entry.value, originalBugs: entry.value),
-          ),
-        ),
-      );
-    _availableBatches.addAll(_createBatches(currentLevel));
+    _loadAnimalLevel(animalId, loadToken);
   }
 
-  List<_PixelData> _generateAnimal(int level) {
-    final pixels = <_PixelData>[];
-    final pattern = _animalPatterns[(level - 1) % _animalPatterns.length];
+  int _selectAnimalId() {
+    currentAnimalId = _animalRandom.nextInt(3) + 1;
+    previousAnimalId = currentAnimalId;
+    return currentAnimalId;
+  }
 
-    for (var row = 0; row < pattern.length; row++) {
-      for (var column = 0; column < pattern[row].length; column++) {
-        if (pattern[row][column] == '#') {
-          final colorIndex = (column ~/ 3 + row ~/ 2 + level) % _palette.length;
-          pixels.add(
-            _PixelData(column: column, row: row, color: _palette[colorIndex]),
-          );
+  Future<void> _loadAnimalLevel(int animalId, int loadToken) async {
+    try {
+      final pixels = await _generateAnimalFromAsset(animalId);
+      if (!mounted || loadToken != _levelLoadToken) return;
+
+      setState(() {
+        _pixels.addAll(pixels);
+        _occupiedCells.addAll(
+          pixels.map((pixel) => _GridPoint(pixel.column, pixel.row)),
+        );
+        _colorStats.addEntries(
+          _countPixelsByColor(_pixels).entries.map(
+            (entry) => MapEntry(
+              entry.key,
+              _ColorStats(
+                originalPixels: entry.value,
+                originalBugs: entry.value,
+              ),
+            ),
+          ),
+        );
+        _availableBatches.addAll(_createBatches(currentLevel));
+        _levelLoadError = null;
+      });
+    } catch (error) {
+      if (!mounted || loadToken != _levelLoadToken) return;
+      debugPrint('Unable to load assets/animals/$animalId.png: $error');
+      setState(() {
+        _levelLoadError = 'Image $animalId is unavailable';
+      });
+    }
+  }
+
+  Future<List<_PixelData>> _generateAnimalFromAsset(int animalId) async {
+    final imageData = await rootBundle.load('assets/animals/$animalId.png');
+    final codec = await ui.instantiateImageCodec(
+      imageData.buffer.asUint8List(),
+      targetWidth: _gridColumns,
+      targetHeight: _gridRows,
+    );
+    final frame = await codec.getNextFrame();
+    final bytes = await frame.image.toByteData(
+      format: ui.ImageByteFormat.rawRgba,
+    );
+    frame.image.dispose();
+    codec.dispose();
+    if (bytes == null) {
+      throw StateError('The animal image could not be decoded.');
+    }
+
+    return _pixelsFromImage(bytes, _gridColumns, _gridRows);
+  }
+
+  List<_PixelData> _pixelsFromImage(
+    ByteData bytes,
+    int gridColumns,
+    int gridRows,
+  ) {
+    final pixels = <_PixelData>[];
+    final backgroundColor = _detectBackgroundColor(
+      bytes,
+      gridColumns,
+      gridRows,
+    );
+    for (var row = 0; row < gridRows; row++) {
+      for (var column = 0; column < gridColumns; column++) {
+        final offset = (row * gridColumns + column) * 4;
+        final alpha = bytes.getUint8(offset + 3);
+        final red = bytes.getUint8(offset);
+        final green = bytes.getUint8(offset + 1);
+        final blue = bytes.getUint8(offset + 2);
+        if (alpha < 64 ||
+            _matchesBackground(backgroundColor, red, green, blue)) {
+          continue;
         }
+        final color = Color.fromARGB(255, red, green, blue);
+        pixels.add(_PixelData(column: column, row: row, color: color));
       }
     }
     return pixels;
+  }
+
+  Color? _detectBackgroundColor(ByteData bytes, int width, int height) {
+    final cornerOffsets = [
+      0,
+      width - 1,
+      (height - 1) * width,
+      width * height - 1,
+    ].map((pixelIndex) => pixelIndex * 4).toList();
+    if (cornerOffsets.any((offset) => bytes.getUint8(offset + 3) < 64)) {
+      return null;
+    }
+
+    final background = Color.fromARGB(
+      255,
+      bytes.getUint8(cornerOffsets.first),
+      bytes.getUint8(cornerOffsets.first + 1),
+      bytes.getUint8(cornerOffsets.first + 2),
+    );
+    final hasUniformCorners = cornerOffsets.skip(1).every((offset) {
+      return _colorDistance(
+            background,
+            bytes.getUint8(offset),
+            bytes.getUint8(offset + 1),
+            bytes.getUint8(offset + 2),
+          ) <=
+          1200;
+    });
+    return hasUniformCorners ? background : null;
+  }
+
+  bool _matchesBackground(Color? background, int red, int green, int blue) {
+    return background != null &&
+        _colorDistance(background, red, green, blue) <= 1200;
+  }
+
+  int _colorDistance(Color color, int red, int green, int blue) {
+    final redDifference = color.r.toInt() - red;
+    final greenDifference = color.g.toInt() - green;
+    final blueDifference = color.b.toInt() - blue;
+    return redDifference * redDifference +
+        greenDifference * greenDifference +
+        blueDifference * blueDifference;
   }
 
   Map<Color, int> _countPixelsByColor(Iterable<_PixelData> pixels) {
@@ -208,7 +255,10 @@ class _GameState extends State<Game> {
     final slotCenter =
         boardWidth / 2 +
         (slotIndex - (_middleSlotCount - 1) / 2) * (slotWidth + slotMargin * 2);
-    final source = _GridPoint((slotCenter / boardWidth * 14 - 0.5).round(), 12);
+    final source = _GridPoint(
+      (slotCenter / boardWidth * _gridColumns - 0.5).round(),
+      _gridRows + 2,
+    );
     target.targeted = true;
     batch.releasedBugs++;
     stats.releasedBugs++;
@@ -229,6 +279,7 @@ class _GameState extends State<Game> {
 
   List<_GridPoint>? _findRouteTo(_GridPoint destination, _GridPoint start) {
     final queue = <_GridPoint>[start];
+    var queueIndex = 0;
     final previous = <_GridPoint, _GridPoint?>{start: null};
     const directions = [
       _GridPoint(0, -1),
@@ -237,8 +288,8 @@ class _GameState extends State<Game> {
       _GridPoint(-1, 0),
     ];
 
-    while (queue.isNotEmpty) {
-      final current = queue.removeAt(0);
+    while (queueIndex < queue.length) {
+      final current = queue[queueIndex++];
       if (current == destination) {
         final route = <_GridPoint>[];
         _GridPoint? step = current;
@@ -266,21 +317,16 @@ class _GameState extends State<Game> {
 
   bool _canBugEnter(_GridPoint point, _GridPoint destination) {
     if (point == destination) return true;
-    if (point.row >= 10 && point.row <= 12) {
-      return point.column >= 0 && point.column < 14;
+    if (point.row >= _gridRows && point.row <= _gridRows + 2) {
+      return point.column >= 0 && point.column < _gridColumns;
     }
     if (point.column < 0 ||
-        point.column >= 14 ||
+        point.column >= _gridColumns ||
         point.row < 0 ||
-        point.row >= 10) {
+        point.row >= _gridRows) {
       return false;
     }
-    return !_pixels.any(
-      (pixel) =>
-          !pixel.destroyed &&
-          pixel.column == point.column &&
-          pixel.row == point.row,
-    );
+    return !_occupiedCells.contains(point);
   }
 
   void _advanceGame(Timer timer) {
@@ -296,7 +342,7 @@ class _GameState extends State<Game> {
         _selectedSlots[_selectedSlots.indexOf(batch)] = null;
         _spawnCooldowns.remove(batch);
         hasChanges = true;
-      } else if (cooldown <= 0) {
+      } else if (cooldown <= 0 && _activeBugs.length < _maximumActiveBugs) {
         _spawnBug(batch);
         _spawnCooldowns[batch] = 0.16;
         hasChanges = true;
@@ -308,25 +354,24 @@ class _GameState extends State<Game> {
     for (final bug in _activeBugs) {
       if (bug.state == _BugState.outbound) {
         bug.route ??= _findRoute(bug.target, bug.source);
-      }
-      if (bug.route == null) continue;
+        if (bug.route == null) continue;
 
-      final travelDuration = (bug.route!.length - 1) * 0.12;
-      bug.progress += 0.016 / travelDuration.clamp(0.12, 2.0);
-      hasChanges = true;
-      if (bug.progress >= 1) {
-        if (bug.state == _BugState.outbound) {
-          if (!bug.target.destroyed) {
-            bug.target.destroyed = true;
-            _colorStats[bug.color]!.destroyedPixels++;
-          }
-          bug.state = _BugState.returning;
-          bug.route = _findRouteTo(
-            _returnHole,
-            _GridPoint(bug.target.column, bug.target.row),
-          );
-          bug.progress = 0;
-        } else {
+        final travelDuration = (bug.route!.length - 1) * 0.12;
+        bug.progress += 0.016 / travelDuration.clamp(0.12, 2.0);
+        hasChanges = true;
+        if (bug.progress < 1) continue;
+
+        if (!bug.target.destroyed) {
+          bug.target.destroyed = true;
+          _occupiedCells.remove(_GridPoint(bug.target.column, bug.target.row));
+          _colorStats[bug.color]!.destroyedPixels++;
+        }
+        bug.state = _BugState.exploding;
+        bug.progress = 0;
+      } else {
+        bug.progress += 0.016 / 0.18;
+        hasChanges = true;
+        if (bug.progress >= 1) {
           bug.hasReturned = true;
           _colorStats[bug.color]!.completedBugs++;
           bug.batch.completedBugs++;
@@ -411,19 +456,6 @@ class _GameState extends State<Game> {
     );
   }
 
-  String _bugImagePath(Color color) {
-    const bugImages = {
-      0xFFF44336: 'assets/bugs/red.png',
-      0xFF4CAF50: 'assets/bugs/green.png',
-      0xFF2196F3: 'assets/bugs/blue.png',
-      0xFFFFFFFF: 'assets/bugs/white.png',
-      0xFF212121: 'assets/bugs/black.png',
-      0xFFFFD740: 'assets/bugs/yellow.png',
-      0xFFE91E63: 'assets/bugs/pink.png',
-    };
-    return bugImages[color.toARGB32()] ?? 'assets/bugs/red.png';
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -456,9 +488,41 @@ class _GameState extends State<Game> {
                         );
                       },
                     ),
-                    Text(
-                      'Level: $currentLevel',
-                      style: TextStyle(fontSize: 20, color: Colors.white),
+                    Row(
+                      children: [
+                        Text(
+                          'Level: $currentLevel',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            color: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Tooltip(
+                          message: 'Selected animal: $currentAnimalId',
+                          child: Container(
+                            width: 42,
+                            height: 42,
+                            padding: const EdgeInsets.all(3),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              border: Border.all(color: Colors.white, width: 2),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Image.asset(
+                              'assets/animals/$currentAnimalId.png',
+                              fit: BoxFit.contain,
+                              errorBuilder: (context, error, stackTrace) {
+                                return const Icon(
+                                  Icons.image_not_supported_outlined,
+                                  color: Colors.red,
+                                  size: 22,
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                     AnimatedImageButton(
                       width: 45,
@@ -487,20 +551,16 @@ class _GameState extends State<Game> {
                         return Stack(
                           clipBehavior: Clip.none,
                           children: [
-                            for (final pixel in _pixels)
-                              if (!pixel.destroyed)
-                                Positioned(
-                                  left:
-                                      pixel.column / 14 * constraints.maxWidth,
-                                  top: pixel.row / 10 * constraints.maxHeight,
-                                  child: BoomPixel(
-                                    color: pixel.color,
-                                    size: min(
-                                      constraints.maxWidth / 14,
-                                      constraints.maxHeight / 10,
-                                    ),
-                                  ),
+                            RepaintBoundary(
+                              child: CustomPaint(
+                                size: constraints.biggest,
+                                painter: _BoardPixelsPainter(
+                                  pixels: _pixels,
+                                  columns: _gridColumns,
+                                  rows: _gridRows,
                                 ),
+                              ),
+                            ),
                             for (final bug in _activeBugs)
                               _MovingBug(
                                 bug: bug,
@@ -514,6 +574,16 @@ class _GameState extends State<Game> {
                                   tooltip: 'Retry level',
                                   icon: const Icon(Icons.refresh),
                                   onPressed: () => setState(_startLevel),
+                                ),
+                              ),
+                            if (_levelLoadError != null)
+                              Center(
+                                child: Text(
+                                  _levelLoadError!,
+                                  style: const TextStyle(
+                                    color: Colors.red,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                 ),
                               ),
                           ],
@@ -597,11 +667,17 @@ class _GameState extends State<Game> {
                                 : Stack(
                                     children: [
                                       Center(
-                                        child: Image.asset(
-                                          _bugImagePath(batch.color),
-                                          width: 34,
-                                          height: 34,
-                                          fit: BoxFit.contain,
+                                        child: ColorFiltered(
+                                          colorFilter: ColorFilter.mode(
+                                            batch.color,
+                                            BlendMode.srcIn,
+                                          ),
+                                          child: Image.asset(
+                                            'assets/bugs/white.png',
+                                            width: 34,
+                                            height: 34,
+                                            fit: BoxFit.contain,
+                                          ),
                                         ),
                                       ),
                                       Positioned(
@@ -741,7 +817,7 @@ class _BugData {
   bool hasReturned = false;
 }
 
-enum _BugState { outbound, returning }
+enum _BugState { outbound, exploding }
 
 class _BugBatch {
   _BugBatch({required this.color, required this.totalBugs});
@@ -812,6 +888,72 @@ class BoomPixel extends StatelessWidget {
       ),
     );
   }
+}
+
+class _BoardPixelsPainter extends CustomPainter {
+  _BoardPixelsPainter({
+    required this.pixels,
+    required this.columns,
+    required this.rows,
+  });
+
+  final List<_PixelData> pixels;
+  final int columns;
+  final int rows;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final pixelWidth = size.width / columns;
+    final pixelHeight = size.height / rows;
+    for (final pixel in pixels) {
+      if (pixel.destroyed) continue;
+      _paintBoomPixel(
+        canvas,
+        Rect.fromLTWH(
+          pixel.column * pixelWidth,
+          pixel.row * pixelHeight,
+          pixelWidth + 0.5,
+          pixelHeight + 0.5,
+        ),
+        pixel.color,
+      );
+    }
+  }
+
+  void _paintBoomPixel(Canvas canvas, Rect rect, Color color) {
+    final shortestSide = rect.shortestSide;
+    final cornerRadius = Radius.circular(shortestSide * 0.14);
+    final dark = Color.lerp(color, Colors.black, 0.35)!;
+    final light = Color.lerp(color, Colors.white, 0.25)!;
+    final outline = RRect.fromRectAndRadius(rect, cornerRadius);
+    final body = RRect.fromRectAndRadius(
+      rect.deflate(shortestSide * 0.08),
+      Radius.circular(shortestSide * 0.1),
+    );
+    canvas.drawRRect(outline, Paint()..color = dark);
+    canvas.drawRRect(body, Paint()..color = color);
+    canvas.drawRect(
+      Rect.fromLTWH(
+        rect.left + shortestSide * 0.18,
+        rect.top + shortestSide * 0.14,
+        rect.width - shortestSide * 0.43,
+        shortestSide * 0.1,
+      ),
+      Paint()..color = light,
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(
+        rect.left + shortestSide * 0.2,
+        rect.bottom - shortestSide * 0.2,
+        rect.width - shortestSide * 0.4,
+        shortestSide * 0.08,
+      ),
+      Paint()..color = dark.withValues(alpha: 0.45),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _BoardPixelsPainter oldDelegate) => true;
 }
 
 class _BoomPixelPainter extends CustomPainter {
@@ -893,20 +1035,16 @@ class _MovingBug extends StatelessWidget {
   final _BugData bug;
   final Size boardSize;
 
-  static const Map<int, String> _bugImages = {
-    0xFFF44336: 'assets/bugs/red.png',
-    0xFF4CAF50: 'assets/bugs/green.png',
-    0xFF2196F3: 'assets/bugs/blue.png',
-    0xFFFFFFFF: 'assets/bugs/white.png',
-    0xFF212121: 'assets/bugs/black.png',
-    0xFFFFD740: 'assets/bugs/yellow.png',
-    0xFFE91E63: 'assets/bugs/pink.png',
-  };
-
   @override
   Widget build(BuildContext context) {
     final route = bug.route;
-    final position = route == null
+    final isExploding = bug.state == _BugState.exploding;
+    final position = isExploding
+        ? _toBoardOffset(
+            _GridPoint(bug.target.column, bug.target.row),
+            boardSize,
+          )
+        : route == null
         ? _toBoardOffset(bug.source, boardSize)
         : _positionOnRoute(route, bug.progress, boardSize);
     final angle = route == null ? 0.0 : _routeAngle(route, bug.progress);
@@ -914,15 +1052,20 @@ class _MovingBug extends StatelessWidget {
     return Positioned(
       left: position.dx - 14,
       top: position.dy - 14,
-      child: Transform.rotate(
-        angle: angle,
-        child: Image.asset(
-          _bugImages[bug.color.toARGB32()] ?? 'assets/bugs/red.png',
-          width: 28,
-          height: 28,
-          fit: BoxFit.contain,
-        ),
-      ),
+      child: isExploding
+          ? _BugExplosion(color: bug.color, progress: bug.progress)
+          : Transform.rotate(
+              angle: angle,
+              child: ColorFiltered(
+                colorFilter: ColorFilter.mode(bug.color, BlendMode.srcIn),
+                child: Image.asset(
+                  'assets/bugs/white.png',
+                  width: 28,
+                  height: 28,
+                  fit: BoxFit.contain,
+                ),
+              ),
+            ),
     );
   }
 
@@ -953,8 +1096,35 @@ class _MovingBug extends StatelessWidget {
 
   Offset _toBoardOffset(_GridPoint point, Size boardSize) {
     return Offset(
-      (point.column + 0.5) / 14 * boardSize.width,
-      (point.row + 0.5) / 10 * boardSize.height,
+      (point.column + 0.5) / _GameState._gridColumns * boardSize.width,
+      (point.row + 0.5) / _GameState._gridRows * boardSize.height,
+    );
+  }
+}
+
+class _BugExplosion extends StatelessWidget {
+  const _BugExplosion({required this.color, required this.progress});
+
+  final Color color;
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = 12 + progress.clamp(0.0, 1.0) * 18;
+    return SizedBox(
+      width: 28,
+      height: 28,
+      child: Center(
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 1 - progress.clamp(0.0, 1.0)),
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 1.5),
+          ),
+        ),
+      ),
     );
   }
 }
