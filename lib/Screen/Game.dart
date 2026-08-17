@@ -18,12 +18,12 @@ class Game extends StatefulWidget {
 class _GameState extends State<Game> {
   static const int _gridColumns = 36;
   static const int _gridRows = 27;
-  static const int _maximumActiveBugs = 15;
+  static const int _animalCount = 22;
 
   int currentLevel = 1;
   int currentAnimalId = 1;
   int? previousAnimalId;
-  final int totalLevels = 5;
+  final int totalLevels = 1000;
   final Random _animalRandom = Random();
   final List<_PixelData> _pixels = [];
   final Set<_GridPoint> _occupiedCells = {};
@@ -32,6 +32,7 @@ class _GameState extends State<Game> {
   final List<_BugBatch> _availableBatches = [];
   final Map<Color, _ColorStats> _colorStats = {};
   final Map<_BugBatch, double> _spawnCooldowns = {};
+  final Random _speedRandom = Random();
   int _middleSlotCount = 3;
   bool _isGameLost = false;
   String? _levelLoadError;
@@ -69,7 +70,7 @@ class _GameState extends State<Game> {
   }
 
   int _selectAnimalId() {
-    currentAnimalId = _animalRandom.nextInt(3) + 1;
+    currentAnimalId = _animalRandom.nextInt(_animalCount) + 1;
     previousAnimalId = currentAnimalId;
     return currentAnimalId;
   }
@@ -95,7 +96,8 @@ class _GameState extends State<Game> {
             ),
           ),
         );
-        _availableBatches.addAll(_createBatches(currentLevel));
+        final batches = _createBatches(currentLevel);
+        _availableBatches.addAll(batches);
         _levelLoadError = null;
       });
     } catch (error) {
@@ -109,10 +111,14 @@ class _GameState extends State<Game> {
 
   Future<List<_PixelData>> _generateAnimalFromAsset(int animalId) async {
     final imageData = await rootBundle.load('assets/animals/$animalId.png');
+    final dimensions = _getLoadDimensions();
+    final loadWidth = dimensions['width']!;
+    final loadHeight = dimensions['height']!;
+
     final codec = await ui.instantiateImageCodec(
       imageData.buffer.asUint8List(),
-      targetWidth: _gridColumns,
-      targetHeight: _gridRows,
+      targetWidth: loadWidth,
+      targetHeight: loadHeight,
     );
     final frame = await codec.getNextFrame();
     final bytes = await frame.image.toByteData(
@@ -124,7 +130,46 @@ class _GameState extends State<Game> {
       throw StateError('The animal image could not be decoded.');
     }
 
-    return _pixelsFromImage(bytes, _gridColumns, _gridRows);
+    final pixels = _pixelsFromImage(bytes, loadWidth, loadHeight);
+    return _scalePixelsToGrid(pixels, loadWidth, loadHeight);
+  }
+
+  Map<String, int> _getLoadDimensions() {
+    // Progressive pixel count based on level
+    // Early levels: fewer pixels (50% resolution)
+    // Mid levels: more pixels (75% resolution)
+    // Late levels: maximum pixels (100% resolution)
+    if (currentLevel <= 100) {
+      return {'width': 18, 'height': 13}; // 50% - early/simple
+    } else if (currentLevel <= 500) {
+      return {'width': 27, 'height': 20}; // 75% - mid/complex
+    } else {
+      return {
+        'width': _gridColumns,
+        'height': _gridRows,
+      }; // 100% - late/detailed
+    }
+  }
+
+  List<_PixelData> _scalePixelsToGrid(
+    List<_PixelData> pixels,
+    int sourceWidth,
+    int sourceHeight,
+  ) {
+    if (sourceWidth == _gridColumns && sourceHeight == _gridRows) {
+      return pixels;
+    }
+    final scaleX = _gridColumns / sourceWidth;
+    final scaleY = _gridRows / sourceHeight;
+    return pixels
+        .map(
+          (p) => _PixelData(
+            column: (p.column * scaleX).round(),
+            row: (p.row * scaleY).round(),
+            color: p.color,
+          ),
+        )
+        .toList();
   }
 
   List<_PixelData> _pixelsFromImage(
@@ -153,7 +198,85 @@ class _GameState extends State<Game> {
         pixels.add(_PixelData(column: column, row: row, color: color));
       }
     }
+    return _normalizePixelColors(pixels);
+  }
+
+  List<_PixelData> _normalizePixelColors(List<_PixelData> pixels) {
+    // Progressive color complexity based on level
+    // Early levels: aggressive color reduction (basic)
+    // Later levels: more color details preserved
+    final closeColorDistance = _getColorDistanceThreshold();
+    final palette = <Color>[];
+    final counts = <Color, int>{};
+
+    for (final pixel in pixels) {
+      Color? matchingColor;
+      for (final color in palette) {
+        if (_colorDistance(
+              color,
+              (pixel.color.r * 255).round(),
+              (pixel.color.g * 255).round(),
+              (pixel.color.b * 255).round(),
+            ) <=
+            closeColorDistance) {
+          matchingColor = color;
+          break;
+        }
+      }
+      final normalizedColor = matchingColor ?? pixel.color;
+      if (matchingColor == null) palette.add(normalizedColor);
+      counts[normalizedColor] = (counts[normalizedColor] ?? 0) + 1;
+      pixel.color = normalizedColor;
+    }
+
+    while (counts.length > 1) {
+      final smallEntry = counts.entries
+          .where((entry) => entry.value < 10)
+          .fold<MapEntry<Color, int>?>(
+            null,
+            (smallest, entry) =>
+                smallest == null || entry.value < smallest.value
+                ? entry
+                : smallest,
+          );
+      if (smallEntry == null) break;
+
+      final targetColor = counts.keys
+          .where((color) => color != smallEntry.key)
+          .reduce((closest, color) {
+            final closestDistance = _colorDistance(
+              closest,
+              (smallEntry.key.r * 255).round(),
+              (smallEntry.key.g * 255).round(),
+              (smallEntry.key.b * 255).round(),
+            );
+            final colorDistance = _colorDistance(
+              color,
+              (smallEntry.key.r * 255).round(),
+              (smallEntry.key.g * 255).round(),
+              (smallEntry.key.b * 255).round(),
+            );
+            return colorDistance < closestDistance ? color : closest;
+          });
+
+      for (final pixel in pixels) {
+        if (pixel.color == smallEntry.key) pixel.color = targetColor;
+      }
+      counts[targetColor] = counts[targetColor]! + smallEntry.value;
+      counts.remove(smallEntry.key);
+    }
     return pixels;
+  }
+
+  int _getColorDistanceThreshold() {
+    // Progressive difficulty: reduce color merging in later levels
+    if (currentLevel <= 100) {
+      return 900; // Early levels: basic/simple colors
+    } else if (currentLevel <= 500) {
+      return 600; // Mid levels: more color variations
+    } else {
+      return 300; // Late levels: fine color details
+    }
   }
 
   Color? _detectBackgroundColor(ByteData bytes, int width, int height) {
@@ -191,9 +314,9 @@ class _GameState extends State<Game> {
   }
 
   int _colorDistance(Color color, int red, int green, int blue) {
-    final redDifference = color.r.toInt() - red;
-    final greenDifference = color.g.toInt() - green;
-    final blueDifference = color.b.toInt() - blue;
+    final redDifference = (color.r * 255).round() - red;
+    final greenDifference = (color.g * 255).round() - green;
+    final blueDifference = (color.b * 255).round() - blue;
     return redDifference * redDifference +
         greenDifference * greenDifference +
         blueDifference * blueDifference;
@@ -211,14 +334,16 @@ class _GameState extends State<Game> {
     final random = Random(level * 4231);
     final batches = <_BugBatch>[];
     for (final entry in _colorStats.entries) {
-      var quantityLeft = entry.value.originalBugs;
-      final largestBatch = 6 + level.clamp(1, 5);
-      while (quantityLeft > 0) {
-        final batchSize = quantityLeft <= largestBatch
-            ? quantityLeft
-            : 4 + random.nextInt(largestBatch - 3);
+      const minimumBatch = 10;
+      final totalBugs = entry.value.originalBugs;
+      final batchCount = totalBugs < minimumBatch
+          ? 1
+          : (totalBugs / minimumBatch).floor();
+      final baseBatchSize = totalBugs ~/ batchCount;
+      var extraBugs = totalBugs % batchCount;
+      for (var index = 0; index < batchCount; index++) {
+        final batchSize = baseBatchSize + (extraBugs-- > 0 ? 1 : 0);
         batches.add(_BugBatch(color: entry.key, totalBugs: batchSize));
-        quantityLeft -= batchSize;
       }
     }
     batches.shuffle(random);
@@ -237,16 +362,17 @@ class _GameState extends State<Game> {
     setState(() {
       _availableBatches.remove(batch);
       _selectedSlots[slotIndex] = batch;
-      _spawnCooldowns[batch] = 0;
+      // Add variation to spawn speed - some boxes release faster, some slower
+      batch.spawnSpeedVariation = 0.7 + _speedRandom.nextDouble() * 0.6;
+      _spawnCooldowns[batch] = _speedRandom.nextDouble() * 0.08;
     });
   }
 
-  void _spawnBug(_BugBatch batch) {
+  void _spawnBugs(_BugBatch batch) {
     final stats = _colorStats[batch.color];
-    final target = _pixels.where((pixel) {
-      return !pixel.destroyed && !pixel.targeted && pixel.color == batch.color;
-    }).firstOrNull;
-    if (stats == null || batch.remainingBugs == 0 || target == null) return;
+    if (stats == null || batch.remainingBugs == 0) {
+      return;
+    }
 
     final slotIndex = _selectedSlots.indexOf(batch);
     const boardWidth = 400.0;
@@ -259,18 +385,139 @@ class _GameState extends State<Game> {
       (slotCenter / boardWidth * _gridColumns - 0.5).round(),
       _gridRows + 2,
     );
-    target.targeted = true;
-    batch.releasedBugs++;
-    stats.releasedBugs++;
-    _activeBugs.add(
-      _BugData(
-        color: batch.color,
-        batch: batch,
-        target: target,
-        source: source,
-        route: _findRoute(target, source),
-      ),
+    final reachableRoutes = _findReachableRoutes(source);
+    while (batch.remainingBugs > 0) {
+      _PixelData? target;
+      List<_GridPoint>? route;
+      for (final candidate in _pixels.where((pixel) {
+        return !pixel.destroyed &&
+            !pixel.targeted &&
+            pixel.color == batch.color;
+      })) {
+        final candidateRoute = _routeToPixel(candidate, reachableRoutes);
+        if (candidateRoute != null) {
+          target = candidate;
+          route = candidateRoute;
+          break;
+        }
+      }
+      if (target == null || route == null) return;
+
+      target.targeted = true;
+      batch.releasedBugs++;
+      stats.releasedBugs++;
+      // Add travel speed variation - bugs move at different speeds
+      final speedMultiplier = 0.6 + _speedRandom.nextDouble() * 0.8;
+      _activeBugs.add(
+        _BugData(
+          color: batch.color,
+          batch: batch,
+          target: target,
+          source: source,
+          route: route,
+          speedMultiplier: speedMultiplier,
+        ),
+      );
+    }
+  }
+
+  bool _hasReachableTarget(_BugBatch batch) {
+    if (batch.remainingBugs == 0) return false;
+
+    final slotIndex = _selectedSlots.indexOf(batch);
+    const boardWidth = 400.0;
+    const slotWidth = 50.0;
+    const slotMargin = 4.0;
+    final slotCenter =
+        boardWidth / 2 +
+        (slotIndex - (_middleSlotCount - 1) / 2) * (slotWidth + slotMargin * 2);
+    final source = _GridPoint(
+      (slotCenter / boardWidth * _gridColumns - 0.5).round(),
+      _gridRows + 2,
     );
+
+    final reachableRoutes = _findReachableRoutes(source);
+    for (final pixel in _pixels) {
+      if (!pixel.destroyed &&
+          !pixel.targeted &&
+          pixel.color == batch.color &&
+          _routeToPixel(pixel, reachableRoutes) != null) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Map<_GridPoint, List<_GridPoint>> _findReachableRoutes(_GridPoint start) {
+    final queue = <_GridPoint>[start];
+    var queueIndex = 0;
+    final previous = <_GridPoint, _GridPoint?>{start: null};
+    const directions = [
+      _GridPoint(0, -1),
+      _GridPoint(1, 0),
+      _GridPoint(0, 1),
+      _GridPoint(-1, 0),
+    ];
+
+    while (queueIndex < queue.length) {
+      final current = queue[queueIndex++];
+      for (final direction in directions) {
+        final next = _GridPoint(
+          current.column + direction.column,
+          current.row + direction.row,
+        );
+        if (previous.containsKey(next) || !_canBugWalk(next)) continue;
+        previous[next] = current;
+        queue.add(next);
+      }
+    }
+
+    final routes = <_GridPoint, List<_GridPoint>>{};
+    for (final point in previous.keys) {
+      final route = <_GridPoint>[];
+      _GridPoint? step = point;
+      while (step != null) {
+        route.add(step);
+        step = previous[step];
+      }
+      routes[point] = route.reversed.toList();
+    }
+    return routes;
+  }
+
+  List<_GridPoint>? _routeToPixel(
+    _PixelData pixel,
+    Map<_GridPoint, List<_GridPoint>> reachableRoutes,
+  ) {
+    const directions = [
+      _GridPoint(0, -1),
+      _GridPoint(1, 0),
+      _GridPoint(0, 1),
+      _GridPoint(-1, 0),
+    ];
+    final target = _GridPoint(pixel.column, pixel.row);
+    for (final direction in directions) {
+      final approach = _GridPoint(
+        target.column + direction.column,
+        target.row + direction.row,
+      );
+      final route = reachableRoutes[approach];
+      if (route != null) return [...route, target];
+    }
+    return null;
+  }
+
+  bool _canBugWalk(_GridPoint point) {
+    if (point.row >= _gridRows && point.row <= _gridRows + 2) {
+      return point.column >= 0 && point.column < _gridColumns;
+    }
+    if (point.column < 0 ||
+        point.column >= _gridColumns ||
+        point.row < 0 ||
+        point.row >= _gridRows) {
+      return false;
+    }
+    return !_occupiedCells.contains(point);
   }
 
   List<_GridPoint>? _findRoute(_PixelData target, _GridPoint start) {
@@ -338,13 +585,16 @@ class _GameState extends State<Game> {
 
     for (final batch in _selectedSlots.whereType<_BugBatch>().toList()) {
       final cooldown = (_spawnCooldowns[batch] ?? 0) - 0.016;
-      if (batch.remainingBugs == 0 && batch.activeBugs == 0) {
+      // Hide slot immediately when all bugs are released (remainingBugs == 0)
+      if (batch.remainingBugs == 0) {
         _selectedSlots[_selectedSlots.indexOf(batch)] = null;
         _spawnCooldowns.remove(batch);
         hasChanges = true;
-      } else if (cooldown <= 0 && _activeBugs.length < _maximumActiveBugs) {
-        _spawnBug(batch);
-        _spawnCooldowns[batch] = 0.16;
+      } else if (cooldown <= 0) {
+        _spawnBugs(batch);
+        // Variable spawn speed based on batch variation
+        final spawnInterval = 0.16 / (batch.spawnSpeedVariation ?? 1.0);
+        _spawnCooldowns[batch] = spawnInterval;
         hasChanges = true;
       } else {
         _spawnCooldowns[batch] = cooldown;
@@ -356,8 +606,10 @@ class _GameState extends State<Game> {
         bug.route ??= _findRoute(bug.target, bug.source);
         if (bug.route == null) continue;
 
-        final travelDuration = (bug.route!.length - 1) * 0.12;
-        bug.progress += 0.016 / travelDuration.clamp(0.12, 2.0);
+        // Apply speed multiplier for variable bug speeds
+        final travelDuration =
+            (bug.route!.length - 1) * 0.18 / bug.speedMultiplier;
+        bug.progress += 0.016 / travelDuration.clamp(0.18, 3.0);
         hasChanges = true;
         if (bug.progress < 1) continue;
 
@@ -386,10 +638,15 @@ class _GameState extends State<Game> {
       shouldAdvanceLevel = true;
     }
 
+    final selectedBatches = _selectedSlots
+        .take(_middleSlotCount)
+        .whereType<_BugBatch>();
+    final hasReachableSelectedBatch = selectedBatches.any(_hasReachableTarget);
     if (!shouldAdvanceLevel &&
         !_selectedSlots.take(_middleSlotCount).contains(null) &&
-        _activeBugs.isNotEmpty &&
-        _activeBugs.every((bug) => bug.route == null)) {
+        !hasReachableSelectedBatch &&
+        (_activeBugs.isEmpty ||
+            _activeBugs.every((bug) => bug.route == null))) {
       shouldLoseLevel = true;
     }
 
@@ -667,22 +924,6 @@ class _GameState extends State<Game> {
                                 : Stack(
                                     children: [
                                       Center(
-                                        child: ColorFiltered(
-                                          colorFilter: ColorFilter.mode(
-                                            batch.color,
-                                            BlendMode.srcIn,
-                                          ),
-                                          child: Image.asset(
-                                            'assets/bugs/white.png',
-                                            width: 34,
-                                            height: 34,
-                                            fit: BoxFit.contain,
-                                          ),
-                                        ),
-                                      ),
-                                      Positioned(
-                                        right: 1,
-                                        bottom: 1,
                                         child: Text(
                                           '${batch.remainingBugs}',
                                           style: TextStyle(
@@ -690,7 +931,7 @@ class _GameState extends State<Game> {
                                                 color!.computeLuminance() > 0.6
                                                 ? Colors.black
                                                 : Colors.white,
-                                            fontSize: 11,
+                                            fontSize: 18,
                                             fontWeight: FontWeight.bold,
                                           ),
                                         ),
@@ -793,7 +1034,7 @@ class _PixelData {
 
   final int column;
   final int row;
-  final Color color;
+  Color color;
   bool destroyed = false;
   bool targeted = false;
 }
@@ -805,6 +1046,7 @@ class _BugData {
     required this.target,
     required this.source,
     required this.route,
+    this.speedMultiplier = 1.0,
   });
 
   final Color color;
@@ -815,6 +1057,7 @@ class _BugData {
   double progress = 0;
   _BugState state = _BugState.outbound;
   bool hasReturned = false;
+  final double speedMultiplier; // Variable speed per bug
 }
 
 enum _BugState { outbound, exploding }
@@ -826,6 +1069,7 @@ class _BugBatch {
   final int totalBugs;
   int releasedBugs = 0;
   int completedBugs = 0;
+  double? spawnSpeedVariation; // Variable spawn speed per batch
 
   int get remainingBugs => totalBugs - releasedBugs;
   int get activeBugs => releasedBugs - completedBugs;
@@ -1048,10 +1292,12 @@ class _MovingBug extends StatelessWidget {
         ? _toBoardOffset(bug.source, boardSize)
         : _positionOnRoute(route, bug.progress, boardSize);
     final angle = route == null ? 0.0 : _routeAngle(route, bug.progress);
+    const bugSize = 18.0; // Reduced from 28
+    const bugRadius = bugSize / 2;
 
     return Positioned(
-      left: position.dx - 14,
-      top: position.dy - 14,
+      left: position.dx - bugRadius,
+      top: position.dy - bugRadius,
       child: isExploding
           ? _BugExplosion(color: bug.color, progress: bug.progress)
           : Transform.rotate(
@@ -1060,8 +1306,8 @@ class _MovingBug extends StatelessWidget {
                 colorFilter: ColorFilter.mode(bug.color, BlendMode.srcIn),
                 child: Image.asset(
                   'assets/bugs/white.png',
-                  width: 28,
-                  height: 28,
+                  width: bugSize,
+                  height: bugSize,
                   fit: BoxFit.contain,
                 ),
               ),
@@ -1110,18 +1356,18 @@ class _BugExplosion extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final size = 12 + progress.clamp(0.0, 1.0) * 18;
+    const bugSize = 18.0; // Match the reduced bug size
+    final explosionSize = 8 + progress.clamp(0.0, 1.0) * 12;
     return SizedBox(
-      width: 28,
-      height: 28,
+      width: bugSize,
+      height: bugSize,
       child: Center(
         child: Container(
-          width: size,
-          height: size,
+          width: explosionSize,
+          height: explosionSize,
           decoration: BoxDecoration(
             color: color.withValues(alpha: 1 - progress.clamp(0.0, 1.0)),
             shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 1.5),
           ),
         ),
       ),
