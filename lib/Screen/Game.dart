@@ -5,8 +5,13 @@ import 'dart:ui' as ui;
 import 'package:boombug/Screen/Menu.dart';
 import 'package:boombug/widgets/animated_image_button.dart';
 import 'package:boombug/widgets/custom_icon_button.dart';
+import 'package:boombug/progress_store.dart';
+import 'package:boombug/rewarded_ad_service.dart';
+import 'package:boombug/widgets/refill_hearts_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+enum _GameTool { bomb, plus, target }
 
 class Game extends StatefulWidget {
   const Game({super.key});
@@ -15,16 +20,16 @@ class Game extends StatefulWidget {
   State<Game> createState() => _GameState();
 }
 
-class _GameState extends State<Game> {
+class _GameState extends State<Game> with WidgetsBindingObserver {
   static const int _gridColumns = 36;
   static const int _gridRows = 27;
   static const int _animalCount = 22;
+  static const int _maxToolUses = 5;
 
-  int currentLevel = 1;
+  int currentLevel = 50;
   int currentAnimalId = 1;
   int? previousAnimalId;
   final int totalLevels = 1000;
-  final Random _animalRandom = Random();
   final List<_PixelData> _pixels = [];
   final Set<_GridPoint> _occupiedCells = {};
   final List<_BugData> _activeBugs = [];
@@ -32,24 +37,84 @@ class _GameState extends State<Game> {
   final List<_BugBatch> _availableBatches = [];
   final Map<Color, _ColorStats> _colorStats = {};
   final Map<_BugBatch, double> _spawnCooldowns = {};
-  final Random _speedRandom = Random();
   int _middleSlotCount = 3;
+  int _coins = 1000;
+  int _hearts = 5;
+  final Map<_GameTool, int> _toolUses = {
+    _GameTool.bomb: 1,
+    _GameTool.plus: 1,
+    _GameTool.target: 1,
+  };
+  _GameTool? _activeTool;
+  bool _isMenuOpen = false;
+  bool _isMenuVisible = false;
+  bool _isSoundMuted = false;
+  bool _isMusicMuted = false;
   bool _isGameLost = false;
   String? _levelLoadError;
   int _levelLoadToken = 0;
   Timer? _gameTimer;
+  Timer? _heartTimer;
+  final ProgressStore _progress = ProgressStore.instance;
+  final RewardedAdService _rewardedAds = RewardedAdService();
 
   @override
   void initState() {
     super.initState();
-    _startLevel();
+    WidgetsBinding.instance.addObserver(this);
+    _progress.addListener(_onProgressChanged);
+    _initializeProgress();
     _gameTimer = Timer.periodic(const Duration(milliseconds: 16), _advanceGame);
+    _heartTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _progress.refreshRecharge().then((_) {
+        if (mounted) setState(() => _hearts = _progress.hearts);
+      });
+    });
+  }
+
+  Future<void> _initializeProgress() async {
+    await _progress.load();
+    if (!mounted) return;
+    setState(() {
+      currentLevel = _progress.level;
+      _coins = _progress.coins;
+      _hearts = _progress.hearts;
+      _startLevel();
+    });
+  }
+
+  void _onProgressChanged() {
+    if (!mounted) return;
+    if (_coins == _progress.coins &&
+        _hearts == _progress.hearts &&
+        currentLevel == _progress.level) {
+      return;
+    }
+    setState(() {
+      _coins = _progress.coins;
+      _hearts = _progress.hearts;
+      currentLevel = _progress.level;
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _gameTimer?.cancel();
+    _heartTimer?.cancel();
+    _progress.removeListener(_onProgressChanged);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    _progress.refresh().then((_) {
+      if (!mounted) return;
+      setState(() {
+        _hearts = _progress.hearts;
+      });
+    });
   }
 
   void _startLevel() {
@@ -64,15 +129,343 @@ class _GameState extends State<Game> {
     _spawnCooldowns.clear();
     _colorStats.clear();
     _isGameLost = false;
+    _activeTool = null;
     _levelLoadError = null;
-    _middleSlotCount = 3 + ((currentLevel - 1) % 3);
+    _middleSlotCount = 3;
     _loadAnimalLevel(animalId, loadToken);
   }
 
+  void _toggleGameMenu() {
+    _playClick();
+    if (_isMenuOpen) {
+      setState(() => _isMenuOpen = false);
+      Future<void>.delayed(const Duration(milliseconds: 420), () {
+        if (!mounted || _isMenuOpen) return;
+        setState(() => _isMenuVisible = false);
+      });
+      return;
+    }
+    setState(() {
+      _isMenuVisible = true;
+      _isMenuOpen = true;
+    });
+  }
+
+  void _openGameMenu() {
+    if (_isMenuOpen) return;
+    _playClick();
+    setState(() {
+      _isMenuVisible = true;
+      _isMenuOpen = true;
+    });
+  }
+
+  void _restartFromMenu() {
+    if (_hearts <= 0) return;
+    _playClick();
+    setState(() {
+      _progress.hearts = _hearts;
+      _progress.consumeHeart();
+      _hearts = _progress.hearts;
+      _isMenuOpen = false;
+      _isMenuVisible = false;
+      _startLevel();
+    });
+    _saveProgress();
+  }
+
+  void _retryLevel() {
+    if (_hearts <= 0) return;
+    _playClick();
+    setState(() {
+      _progress.hearts = _hearts;
+      _progress.consumeHeart();
+      _hearts = _progress.hearts;
+      _startLevel();
+    });
+    _saveProgress();
+  }
+
+  void _playClick() {
+    if (!_isSoundMuted) {
+      SystemSound.play(SystemSoundType.click);
+    }
+  }
+
+  void _toggleSound() {
+    final wasMuted = _isSoundMuted;
+    setState(() => _isSoundMuted = !_isSoundMuted);
+    if (wasMuted) _playClick();
+  }
+
+  void _toggleMusic() {
+    _playClick();
+    setState(() => _isMusicMuted = !_isMusicMuted);
+  }
+
   int _selectAnimalId() {
-    currentAnimalId = _animalRandom.nextInt(_animalCount) + 1;
+    currentAnimalId = ((currentLevel - 1) % _animalCount) + 1;
     previousAnimalId = currentAnimalId;
     return currentAnimalId;
+  }
+
+  int _unlockLevel(_GameTool tool) {
+    return switch (tool) {
+      _GameTool.bomb => 12,
+      _GameTool.plus => 24,
+      _GameTool.target => 36,
+    };
+  }
+
+  int _toolPrice(_GameTool tool) {
+    return switch (tool) {
+      _GameTool.bomb => 200,
+      _GameTool.plus => 350,
+      _GameTool.target => 500,
+    };
+  }
+
+  void _pressTool(_GameTool tool) {
+    final unlockLevel = _unlockLevel(tool);
+    if (currentLevel < unlockLevel) {
+      return;
+    }
+    if ((_toolUses[tool] ?? 0) == 0) {
+      _showToolPurchase(tool);
+      return;
+    }
+    if (tool == _GameTool.plus) {
+      if (_middleSlotCount >= _selectedSlots.length) return;
+      setState(() {
+        _middleSlotCount++;
+        _toolUses[tool] = _toolUses[tool]! - 1;
+      });
+      return;
+    }
+    setState(() => _activeTool = tool);
+  }
+
+  Future<void> _showToolPurchase(_GameTool tool) async {
+    final price = _toolPrice(tool);
+    final currentUses = _toolUses[tool] ?? 0;
+    final availableUses = _maxToolUses - currentUses;
+    if (availableUses <= 0) return;
+    final selectedUses = await showDialog<int>(
+      context: context,
+      builder: (context) {
+        var quantity = 1;
+        return StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            backgroundColor: const Color(0xFF4E2B78),
+            insetPadding: const EdgeInsets.symmetric(horizontal: 64),
+            contentPadding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+            actionsPadding: const EdgeInsets.only(bottom: 12),
+            actionsAlignment: MainAxisAlignment.center,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: const BorderSide(color: Color(0xFFFFC700), width: 3),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    activeTrackColor: const Color(0xFFFFC700),
+                    inactiveTrackColor: Colors.white24,
+                    thumbColor: const Color(0xFFFFC700),
+                    overlayColor: const Color(0x33FFC700),
+                    valueIndicatorColor: const Color(0xFFFF7A00),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '$quantity uses - ${price * quantity} coins',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      Slider(
+                        value: quantity.toDouble(),
+                        min: 1,
+                        max: availableUses.toDouble(),
+                        divisions: availableUses > 1 ? availableUses - 1 : null,
+                        label: '$quantity',
+                        onChanged: (value) {
+                          setDialogState(() => quantity = value.round());
+                        },
+                      ),
+                      Text(
+                        'Choose 1-$availableUses uses',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFFF7A00),
+                  foregroundColor: Colors.white,
+                  side: const BorderSide(color: Color(0xFFFFC700), width: 2),
+                ),
+                onPressed: _coins >= price * quantity
+                    ? () => Navigator.pop(context, quantity)
+                    : null,
+                child: const Text('BUY'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (selectedUses == null || !mounted) return;
+    final totalPrice = price * selectedUses;
+    if (_coins < totalPrice) return;
+    setState(() {
+      _coins -= totalPrice;
+      _toolUses[tool] = (currentUses + selectedUses).clamp(0, _maxToolUses);
+    });
+    await _saveProgress();
+  }
+
+  Future<void> _saveProgress() async {
+    _progress
+      ..level = currentLevel
+      ..coins = _coins
+      ..hearts = _hearts;
+    await _progress.save();
+  }
+
+  Future<void> _showHeartRefill() async {
+    if (_hearts != 0) return;
+    final action = await showRefillHeartsDialog(context);
+    if (action == null || !mounted) return;
+    if (action == RefillHeartsAction.buyWithCoins) {
+      if (_coins < 250) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('You need 250 coins to refill hearts.')),
+        );
+        return;
+      }
+      setState(() {
+        _coins -= 250;
+        _progress.coins = _coins;
+        _progress.refillHearts();
+        _hearts = _progress.hearts;
+        _isGameLost = false;
+        _startLevel();
+      });
+      await _saveProgress();
+      return;
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('Loading ad...'),
+          ],
+        ),
+      ),
+    );
+    final completed = await _rewardedAds.watchAds(3);
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+    if (!completed) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('The ad was not completed. No hearts added.'),
+        ),
+      );
+      return;
+    }
+    setState(() {
+      _progress.refillHearts();
+      _hearts = _progress.hearts;
+      _isGameLost = false;
+      _startLevel();
+    });
+    await _saveProgress();
+  }
+
+  void _handleBoardTap(Offset localPosition, Size boardSize) {
+    final tool = _activeTool;
+    if (tool == null || _isGameLost || _pixels.isEmpty) return;
+    final column = (localPosition.dx / boardSize.width * _gridColumns)
+        .floor()
+        .clamp(0, _gridColumns - 1);
+    final row = (localPosition.dy / boardSize.height * _gridRows).floor().clamp(
+      0,
+      _gridRows - 1,
+    );
+    if (tool == _GameTool.bomb) {
+      _useBombAt(column, row);
+    } else {
+      _useTargetAt(column, row);
+    }
+  }
+
+  void _useBombAt(int column, int row) {
+    final pixels = _pixels.where((pixel) {
+      return !pixel.destroyed &&
+          (pixel.column - column).abs() <= 1 &&
+          (pixel.row - row).abs() <= 1;
+    }).toList();
+    if (pixels.isEmpty) return;
+    setState(() {
+      for (final pixel in pixels) {
+        _destroyPixel(pixel);
+      }
+      _toolUses[_GameTool.bomb] = _toolUses[_GameTool.bomb]! - 1;
+      _activeTool = null;
+    });
+  }
+
+  void _useTargetAt(int column, int row) {
+    final selectedPixel = _pixels.cast<_PixelData?>().firstWhere(
+      (pixel) =>
+          pixel != null &&
+          !pixel.destroyed &&
+          pixel.column == column &&
+          pixel.row == row,
+      orElse: () => null,
+    );
+    if (selectedPixel == null) return;
+    final color = selectedPixel.color;
+    setState(() {
+      for (final pixel in _pixels.where((pixel) => pixel.color == color)) {
+        _destroyPixel(pixel);
+      }
+      _activeBugs.removeWhere((bug) => bug.color == color);
+      for (final batch in _availableBatches.where(
+        (batch) => batch.color == color,
+      )) {
+        batch.releasedBugs = batch.totalBugs;
+      }
+      for (var index = 0; index < _selectedSlots.length; index++) {
+        if (_selectedSlots[index]?.color == color) _selectedSlots[index] = null;
+      }
+      _availableBatches.removeWhere((batch) => batch.color == color);
+      _toolUses[_GameTool.target] = _toolUses[_GameTool.target]! - 1;
+      _activeTool = null;
+    });
+  }
+
+  void _destroyPixel(_PixelData pixel) {
+    if (pixel.destroyed) return;
+    pixel.destroyed = true;
+    pixel.targeted = false;
+    _occupiedCells.remove(_GridPoint(pixel.column, pixel.row));
+    _colorStats[pixel.color]?.destroyedPixels++;
   }
 
   Future<void> _loadAnimalLevel(int animalId, int loadToken) async {
@@ -111,14 +504,11 @@ class _GameState extends State<Game> {
 
   Future<List<_PixelData>> _generateAnimalFromAsset(int animalId) async {
     final imageData = await rootBundle.load('assets/animals/$animalId.png');
-    final dimensions = _getLoadDimensions();
-    final loadWidth = dimensions['width']!;
-    final loadHeight = dimensions['height']!;
 
     final codec = await ui.instantiateImageCodec(
       imageData.buffer.asUint8List(),
-      targetWidth: loadWidth,
-      targetHeight: loadHeight,
+      targetWidth: _gridColumns,
+      targetHeight: _gridRows,
     );
     final frame = await codec.getNextFrame();
     final bytes = await frame.image.toByteData(
@@ -130,46 +520,7 @@ class _GameState extends State<Game> {
       throw StateError('The animal image could not be decoded.');
     }
 
-    final pixels = _pixelsFromImage(bytes, loadWidth, loadHeight);
-    return _scalePixelsToGrid(pixels, loadWidth, loadHeight);
-  }
-
-  Map<String, int> _getLoadDimensions() {
-    // Progressive pixel count based on level
-    // Early levels: fewer pixels (50% resolution)
-    // Mid levels: more pixels (75% resolution)
-    // Late levels: maximum pixels (100% resolution)
-    if (currentLevel <= 100) {
-      return {'width': 18, 'height': 13}; // 50% - early/simple
-    } else if (currentLevel <= 500) {
-      return {'width': 27, 'height': 20}; // 75% - mid/complex
-    } else {
-      return {
-        'width': _gridColumns,
-        'height': _gridRows,
-      }; // 100% - late/detailed
-    }
-  }
-
-  List<_PixelData> _scalePixelsToGrid(
-    List<_PixelData> pixels,
-    int sourceWidth,
-    int sourceHeight,
-  ) {
-    if (sourceWidth == _gridColumns && sourceHeight == _gridRows) {
-      return pixels;
-    }
-    final scaleX = _gridColumns / sourceWidth;
-    final scaleY = _gridRows / sourceHeight;
-    return pixels
-        .map(
-          (p) => _PixelData(
-            column: (p.column * scaleX).round(),
-            row: (p.row * scaleY).round(),
-            color: p.color,
-          ),
-        )
-        .toList();
+    return _pixelsFromImage(bytes, _gridColumns, _gridRows);
   }
 
   List<_PixelData> _pixelsFromImage(
@@ -269,13 +620,13 @@ class _GameState extends State<Game> {
   }
 
   int _getColorDistanceThreshold() {
-    // Progressive difficulty: reduce color merging in later levels
+    // Difficulty comes from color boxes, not pixel resolution.
     if (currentLevel <= 100) {
-      return 900; // Early levels: basic/simple colors
+      return 1600; // Early levels: fewer color boxes
     } else if (currentLevel <= 500) {
-      return 600; // Mid levels: more color variations
+      return 800; // Mid levels: more color boxes
     } else {
-      return 300; // Late levels: fine color details
+      return 300; // Late levels: fine color boxes
     }
   }
 
@@ -333,12 +684,16 @@ class _GameState extends State<Game> {
   List<_BugBatch> _createBatches(int level) {
     final random = Random(level * 4231);
     final batches = <_BugBatch>[];
+    final bugsPerBox = level <= 100
+        ? 30
+        : level <= 500
+        ? 18
+        : 10;
     for (final entry in _colorStats.entries) {
-      const minimumBatch = 10;
-      final totalBugs = entry.value.originalBugs;
-      final batchCount = totalBugs < minimumBatch
+      final totalBugs = entry.value.originalPixels;
+      final batchCount = totalBugs < bugsPerBox
           ? 1
-          : (totalBugs / minimumBatch).floor();
+          : (totalBugs / bugsPerBox).ceil();
       final baseBatchSize = totalBugs ~/ batchCount;
       var extraBugs = totalBugs % batchCount;
       for (var index = 0; index < batchCount; index++) {
@@ -350,27 +705,26 @@ class _GameState extends State<Game> {
     return batches;
   }
 
-  void _selectBatch(_BugBatch batch) {
-    final slotIndex = _selectedSlots
-        .take(_middleSlotCount)
-        .toList()
-        .indexOf(null);
-    if (slotIndex == -1 || !_availableBatches.contains(batch) || _isGameLost) {
+  void _selectBatchAt(_BugBatch batch, int slotIndex) {
+    if (_activeTool != null ||
+        slotIndex == -1 ||
+        !_availableBatches.contains(batch) ||
+        _isGameLost) {
+      return;
+    }
+    if (slotIndex >= _middleSlotCount || _selectedSlots[slotIndex] != null) {
       return;
     }
 
     setState(() {
       _availableBatches.remove(batch);
       _selectedSlots[slotIndex] = batch;
-      // Add variation to spawn speed - some boxes release faster, some slower
-      batch.spawnSpeedVariation = 0.7 + _speedRandom.nextDouble() * 0.6;
-      _spawnCooldowns[batch] = _speedRandom.nextDouble() * 0.08;
+      _spawnCooldowns[batch] = 0;
     });
   }
 
   void _spawnBugs(_BugBatch batch) {
-    final stats = _colorStats[batch.color];
-    if (stats == null || batch.remainingBugs == 0) {
+    if (batch.remainingBugs == 0) {
       return;
     }
 
@@ -386,14 +740,26 @@ class _GameState extends State<Game> {
       _gridRows + 2,
     );
     final reachableRoutes = _findReachableRoutes(source);
-    while (batch.remainingBugs > 0) {
+    final candidates =
+        _pixels
+            .where(
+              (pixel) =>
+                  !pixel.destroyed &&
+                  !pixel.targeted &&
+                  pixel.color == batch.color,
+            )
+            .toList()
+          ..sort((first, second) {
+            final rowOrder = first.row.compareTo(second.row);
+            return rowOrder != 0
+                ? rowOrder
+                : first.column.compareTo(second.column);
+          });
+    if (batch.remainingBugs > 0) {
       _PixelData? target;
       List<_GridPoint>? route;
-      for (final candidate in _pixels.where((pixel) {
-        return !pixel.destroyed &&
-            !pixel.targeted &&
-            pixel.color == batch.color;
-      })) {
+      for (final candidate in candidates) {
+        if (candidate.destroyed || candidate.targeted) continue;
         final candidateRoute = _routeToPixel(candidate, reachableRoutes);
         if (candidateRoute != null) {
           target = candidate;
@@ -401,21 +767,25 @@ class _GameState extends State<Game> {
           break;
         }
       }
-      if (target == null || route == null) return;
+      if (target == null || route == null) {
+        // A box finishes only after its remaining pixels were destroyed.
+        if (candidates.isEmpty) {
+          batch.releasedBugs = batch.totalBugs;
+        }
+        return;
+      }
 
+      final targets = <_PixelData>[target];
       target.targeted = true;
       batch.releasedBugs++;
-      stats.releasedBugs++;
-      // Add travel speed variation - bugs move at different speeds
-      final speedMultiplier = 0.6 + _speedRandom.nextDouble() * 0.8;
+      _colorStats[batch.color]?.releasedBugs++;
       _activeBugs.add(
         _BugData(
           color: batch.color,
           batch: batch,
-          target: target,
+          targets: targets,
           source: source,
           route: route,
-          speedMultiplier: speedMultiplier,
         ),
       );
     }
@@ -520,68 +890,13 @@ class _GameState extends State<Game> {
     return !_occupiedCells.contains(point);
   }
 
-  List<_GridPoint>? _findRoute(_PixelData target, _GridPoint start) {
-    return _findRouteTo(_GridPoint(target.column, target.row), start);
-  }
-
-  List<_GridPoint>? _findRouteTo(_GridPoint destination, _GridPoint start) {
-    final queue = <_GridPoint>[start];
-    var queueIndex = 0;
-    final previous = <_GridPoint, _GridPoint?>{start: null};
-    const directions = [
-      _GridPoint(0, -1),
-      _GridPoint(1, 0),
-      _GridPoint(0, 1),
-      _GridPoint(-1, 0),
-    ];
-
-    while (queueIndex < queue.length) {
-      final current = queue[queueIndex++];
-      if (current == destination) {
-        final route = <_GridPoint>[];
-        _GridPoint? step = current;
-        while (step != null) {
-          route.add(step);
-          step = previous[step];
-        }
-        return route.reversed.toList();
-      }
-
-      for (final direction in directions) {
-        final next = _GridPoint(
-          current.column + direction.column,
-          current.row + direction.row,
-        );
-        if (previous.containsKey(next) || !_canBugEnter(next, destination)) {
-          continue;
-        }
-        previous[next] = current;
-        queue.add(next);
-      }
-    }
-    return null;
-  }
-
-  bool _canBugEnter(_GridPoint point, _GridPoint destination) {
-    if (point == destination) return true;
-    if (point.row >= _gridRows && point.row <= _gridRows + 2) {
-      return point.column >= 0 && point.column < _gridColumns;
-    }
-    if (point.column < 0 ||
-        point.column >= _gridColumns ||
-        point.row < 0 ||
-        point.row >= _gridRows) {
-      return false;
-    }
-    return !_occupiedCells.contains(point);
-  }
-
   void _advanceGame(Timer timer) {
-    if (_isGameLost) return;
+    if (_isGameLost || _isMenuVisible) return;
 
     var shouldAdvanceLevel = false;
     var shouldLoseLevel = false;
     var hasChanges = false;
+    var shouldSaveProgress = false;
 
     for (final batch in _selectedSlots.whereType<_BugBatch>().toList()) {
       final cooldown = (_spawnCooldowns[batch] ?? 0) - 0.016;
@@ -592,9 +907,7 @@ class _GameState extends State<Game> {
         hasChanges = true;
       } else if (cooldown <= 0) {
         _spawnBugs(batch);
-        // Variable spawn speed based on batch variation
-        final spawnInterval = 0.16 / (batch.spawnSpeedVariation ?? 1.0);
-        _spawnCooldowns[batch] = spawnInterval;
+        _spawnCooldowns[batch] = 0.16;
         hasChanges = true;
       } else {
         _spawnCooldowns[batch] = cooldown;
@@ -603,20 +916,18 @@ class _GameState extends State<Game> {
 
     for (final bug in _activeBugs) {
       if (bug.state == _BugState.outbound) {
-        bug.route ??= _findRoute(bug.target, bug.source);
         if (bug.route == null) continue;
 
-        // Apply speed multiplier for variable bug speeds
-        final travelDuration =
-            (bug.route!.length - 1) * 0.18 / bug.speedMultiplier;
+        final travelDuration = (bug.route!.length - 1) * 0.18;
         bug.progress += 0.016 / travelDuration.clamp(0.18, 3.0);
         hasChanges = true;
         if (bug.progress < 1) continue;
 
-        if (!bug.target.destroyed) {
-          bug.target.destroyed = true;
-          _occupiedCells.remove(_GridPoint(bug.target.column, bug.target.row));
-          _colorStats[bug.color]!.destroyedPixels++;
+        for (final target in bug.targets) {
+          if (target.destroyed) continue;
+          target.destroyed = true;
+          _occupiedCells.remove(_GridPoint(target.column, target.row));
+          _colorStats[target.color]?.destroyedPixels++;
         }
         bug.state = _BugState.exploding;
         bug.progress = 0;
@@ -625,7 +936,7 @@ class _GameState extends State<Game> {
         hasChanges = true;
         if (bug.progress >= 1) {
           bug.hasReturned = true;
-          _colorStats[bug.color]!.completedBugs++;
+          _colorStats[bug.color]?.completedBugs++;
           bug.batch.completedBugs++;
         }
       }
@@ -653,18 +964,26 @@ class _GameState extends State<Game> {
     if (hasChanges || shouldAdvanceLevel || shouldLoseLevel) {
       setState(() {
         if (shouldAdvanceLevel) {
+          _coins += 40;
           currentLevel = currentLevel < totalLevels ? currentLevel + 1 : 1;
           _startLevel();
+          shouldSaveProgress = true;
         } else if (shouldLoseLevel) {
+          _progress.hearts = _hearts;
+          _progress.consumeHeart();
+          _hearts = _progress.hearts;
           _isGameLost = true;
+          _activeTool = null;
+          shouldSaveProgress = true;
         }
       });
     }
+    if (shouldSaveProgress) _saveProgress();
   }
 
   BoxDecoration _boardDecoration() {
     return BoxDecoration(
-      color: Colors.white.withValues(alpha: 0.82),
+      color: Colors.white.withValues(alpha: 0.2),
       border: Border.all(color: Colors.white, width: 4),
       borderRadius: BorderRadius.circular(10),
       boxShadow: const [
@@ -713,6 +1032,57 @@ class _GameState extends State<Game> {
     );
   }
 
+  Widget _buildToolButton(_GameTool tool, String imagePath) {
+    final unlocked = currentLevel >= _unlockLevel(tool);
+    final uses = _toolUses[tool] ?? 0;
+    final isActive = _activeTool == tool;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _ActiveToolPulse(
+          isActive: isActive,
+          child: Stack(
+            children: [
+              AnimatedImageButton(
+                width: 50,
+                height: 50,
+                imagePath: imagePath,
+                fit: BoxFit.cover,
+                borderRadius: BorderRadius.circular(16),
+                onPressed: () => _pressTool(tool),
+              ),
+              if (!unlocked)
+                Positioned(
+                  top: 1,
+                  right: 1,
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.65),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.lock,
+                      color: Colors.white,
+                      size: 14,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Text(
+          unlocked ? 'x$uses' : 'Level ${_unlockLevel(tool)}',
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -726,306 +1096,660 @@ class _GameState extends State<Game> {
             fit: BoxFit.cover,
           ),
         ),
-        child: SafeArea(
-          child: Stack(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    CustomIconButton(
-                      size: 30,
-                      width: 40,
-                      height: 40,
-                      icon: Icons.arrow_back,
-                      onPressed: () {
-                        Navigator.of(context).pushReplacement(
-                          MaterialPageRoute(builder: (_) => const MenuScreen()),
-                        );
-                      },
-                    ),
-                    Row(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (_isMenuVisible)
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: _toggleGameMenu,
+                  child: Container(color: Colors.black.withValues(alpha: 0.68)),
+                ),
+              ),
+            SafeArea(
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(
-                          'Level: $currentLevel',
-                          style: const TextStyle(
-                            fontSize: 20,
-                            color: Colors.white,
+                        CustomIconButton(
+                          size: 30,
+                          width: 40,
+                          height: 40,
+                          icon: Icons.arrow_back,
+                          onPressed: () {
+                            Navigator.of(context).pushReplacement(
+                              MaterialPageRoute(
+                                builder: (_) => const MenuScreen(),
+                              ),
+                            );
+                          },
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [Color(0xFF245B82), Color(0xFF102F50)],
+                            ),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: const Color(0xFFFFC700),
+                              width: 3,
+                            ),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color(0xFFFF7A00),
+                                offset: Offset(0, 4),
+                                blurRadius: 0,
+                              ),
+                              BoxShadow(
+                                color: Color(0xFF174A9C),
+                                offset: Offset(0, 2),
+                                blurRadius: 2,
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            'LEVEL $currentLevel',
+                            style: const TextStyle(
+                              color: Color(0xFFFFC700),
+                              fontSize: 19,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1.2,
+                              shadows: [
+                                Shadow(
+                                  color: Color(0xFF7A4100),
+                                  offset: Offset(1, 2),
+                                  blurRadius: 0,
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Tooltip(
-                          message: 'Selected animal: $currentAnimalId',
-                          child: Container(
-                            width: 42,
-                            height: 42,
-                            padding: const EdgeInsets.all(3),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              border: Border.all(color: Colors.white, width: 2),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Image.asset(
-                              'assets/animals/$currentAnimalId.png',
-                              fit: BoxFit.contain,
-                              errorBuilder: (context, error, stackTrace) {
-                                return const Icon(
-                                  Icons.image_not_supported_outlined,
-                                  color: Colors.red,
-                                  size: 22,
-                                );
-                              },
-                            ),
-                          ),
+                        AnimatedImageButton(
+                          width: 45,
+                          height: 45,
+                          imagePath: 'assets/icons/Setting_icon.png',
+                          fit: BoxFit.cover,
+                          borderRadius: BorderRadius.circular(16),
+                          onPressed: _openGameMenu,
                         ),
                       ],
                     ),
-                    AnimatedImageButton(
-                      width: 45,
-                      height: 45,
-                      imagePath: 'assets/icons/menu_icon.png',
-                      fit: BoxFit.cover,
-                      borderRadius: BorderRadius.circular(16),
-                      onPressed: () {},
-                    ),
-                  ],
-                ),
-              ),
+                  ),
 
-              Positioned(
-                top: 0,
-                right: 15,
-                left: 15,
-                bottom: 300,
-                child: Center(
-                  child: Container(
-                    width: 400,
-                    height: 300,
-                    decoration: _boardDecoration(),
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        return Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            RepaintBoundary(
-                              child: CustomPaint(
-                                size: constraints.biggest,
-                                painter: _BoardPixelsPainter(
-                                  pixels: _pixels,
-                                  columns: _gridColumns,
-                                  rows: _gridRows,
+                  Positioned(
+                    top: 0,
+                    right: 15,
+                    left: 15,
+                    bottom: 300,
+                    child: Center(
+                      child: Container(
+                        width: 400,
+                        height: 300,
+                        decoration: _boardDecoration(),
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              return GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTapUp: (details) => _handleBoardTap(
+                                  details.localPosition,
+                                  constraints.biggest,
                                 ),
-                              ),
-                            ),
-                            for (final bug in _activeBugs)
-                              _MovingBug(
-                                bug: bug,
-                                boardSize: constraints.biggest,
-                              ),
-                            if (_isGameLost)
-                              Center(
-                                child: IconButton(
-                                  iconSize: 42,
-                                  color: Colors.white,
-                                  tooltip: 'Retry level',
-                                  icon: const Icon(Icons.refresh),
-                                  onPressed: () => setState(_startLevel),
-                                ),
-                              ),
-                            if (_levelLoadError != null)
-                              Center(
-                                child: Text(
-                                  _levelLoadError!,
-                                  style: const TextStyle(
-                                    color: Colors.red,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        );
-                      },
-                    ),
-                  ),
-                ),
-              ),
-              Positioned(
-                bottom: 260,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: List.generate(_middleSlotCount, (index) {
-                      final batch = _selectedSlots[index];
-                      final color = batch?.color;
-                      return AnimatedContainer(
-                        duration: const Duration(milliseconds: 250),
-                        width: 50,
-                        height: 50,
-                        margin: const EdgeInsets.symmetric(horizontal: 4),
-                        decoration: _slotDecoration(
-                          color,
-                          active: color != null,
-                        ),
-                        child: batch == null
-                            ? null
-                            : Center(
-                                child: Text(
-                                  '${batch.remainingBugs}',
-                                  style: TextStyle(
-                                    color: color!.computeLuminance() > 0.6
-                                        ? Colors.black
-                                        : Colors.white,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                      );
-                    }),
-                  ),
-                ),
-              ),
-              Positioned(
-                bottom: 120,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: SizedBox(
-                    width: 194,
-                    child: Wrap(
-                      spacing: 10,
-                      runSpacing: 10,
-                      children: List.generate(5, (index) {
-                        final batch = index < _availableBatches.length
-                            ? _availableBatches[index]
-                            : null;
-                        final color = batch?.color;
-                        final isQueueFront = batch != null && index < 3;
-                        return GestureDetector(
-                          onTap: !isQueueFront
-                              ? null
-                              : () => _selectBatch(batch),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 250),
-                            width: 50,
-                            height: 50,
-                            margin: const EdgeInsets.symmetric(horizontal: 4),
-                            decoration: _slotDecoration(
-                              isQueueFront
-                                  ? color
-                                  : color?.withValues(alpha: 0.45),
-                              active: isQueueFront,
-                            ),
-                            child: batch == null
-                                ? null
-                                : Stack(
-                                    children: [
+                                child: Stack(
+                                  clipBehavior: Clip.none,
+                                  children: [
+                                    RepaintBoundary(
+                                      child: CustomPaint(
+                                        size: constraints.biggest,
+                                        painter: _BoardPixelsPainter(
+                                          pixels: _pixels,
+                                          columns: _gridColumns,
+                                          rows: _gridRows,
+                                        ),
+                                      ),
+                                    ),
+                                    for (final bug in _activeBugs)
+                                      _MovingBug(
+                                        bug: bug,
+                                        boardSize: constraints.biggest,
+                                      ),
+                                    if (_isGameLost)
+                                      Center(
+                                        child: IconButton(
+                                          iconSize: 42,
+                                          color: Colors.white,
+                                          tooltip: _hearts > 0
+                                              ? 'Retry level - 1 heart'
+                                              : 'No hearts remaining',
+                                          icon: const Icon(Icons.refresh),
+                                          onPressed: _hearts > 0
+                                              ? _retryLevel
+                                              : null,
+                                        ),
+                                      ),
+                                    if (_levelLoadError != null)
                                       Center(
                                         child: Text(
-                                          '${batch.remainingBugs}',
-                                          style: TextStyle(
-                                            color:
-                                                color!.computeLuminance() > 0.6
-                                                ? Colors.black
-                                                : Colors.white,
-                                            fontSize: 18,
+                                          _levelLoadError!,
+                                          style: const TextStyle(
+                                            color: Colors.red,
                                             fontWeight: FontWeight.bold,
                                           ),
                                         ),
                                       ),
-                                      if (!isQueueFront)
-                                        Positioned.fill(
-                                          child: IgnorePointer(
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                color: const Color(0x66000000),
-                                                borderRadius:
-                                                    BorderRadius.circular(5),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                    ],
-                                  ),
+                                  ],
+                                ),
+                              );
+                            },
                           ),
-                        );
-                      }),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ),
-              Positioned(
-                bottom: 340,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: Container(
-                    width: 30,
-                    height: 30,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF24150F),
-                      borderRadius: BorderRadius.circular(50),
-                      border: Border.all(
-                        color: const Color(0xFF9B5B2A),
-                        width: 3,
+                  Positioned(
+                    bottom: 265,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: IgnorePointer(
+                        ignoring: _activeTool != null,
+                        child: Opacity(
+                          opacity: _activeTool != null ? 0.45 : 1,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: List.generate(_middleSlotCount, (index) {
+                              final batch = _selectedSlots[index];
+                              final color = batch?.color;
+                              return DragTarget<_BugBatch>(
+                                onWillAcceptWithDetails: (details) =>
+                                    batch == null && _activeTool == null,
+                                onAcceptWithDetails: (details) =>
+                                    _selectBatchAt(details.data, index),
+                                builder: (context, candidates, rejected) {
+                                  return _AnimatedBatchBox(
+                                    isBeating:
+                                        batch != null && batch.activeBugs > 0,
+                                    child: AnimatedContainer(
+                                      duration: const Duration(
+                                        milliseconds: 250,
+                                      ),
+                                      width: 50,
+                                      height: 50,
+                                      margin: const EdgeInsets.symmetric(
+                                        horizontal: 4,
+                                      ),
+                                      decoration: _slotDecoration(
+                                        color,
+                                        active:
+                                            color != null ||
+                                            candidates.isNotEmpty,
+                                      ),
+                                      child: batch == null
+                                          ? null
+                                          : Center(
+                                              child: Text(
+                                                '${batch.remainingBugs}',
+                                                style: TextStyle(
+                                                  color:
+                                                      color!.computeLuminance() >
+                                                          0.6
+                                                      ? Colors.black
+                                                      : Colors.white,
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                            ),
+                                    ),
+                                  );
+                                },
+                              );
+                            }),
+                          ),
+                        ),
                       ),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x9900173A),
-                          blurRadius: 5,
-                          offset: Offset(0, 3),
+                    ),
+                  ),
+                  Positioned(
+                    bottom: 120,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: IgnorePointer(
+                        ignoring: _activeTool != null,
+                        child: Opacity(
+                          opacity: _activeTool != null ? 0.45 : 1,
+                          child: SizedBox(
+                            width: 194,
+                            child: Wrap(
+                              spacing: 10,
+                              runSpacing: 10,
+                              children: List.generate(5, (index) {
+                                final batch = index < _availableBatches.length
+                                    ? _availableBatches[index]
+                                    : null;
+                                final color = batch?.color;
+                                final isQueueFront = batch != null && index < 3;
+                                final box = _AnimatedBatchBox(
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 250),
+                                    width: 50,
+                                    height: 50,
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                    ),
+                                    decoration: _slotDecoration(
+                                      isQueueFront
+                                          ? color
+                                          : color?.withValues(alpha: 0.45),
+                                      active: isQueueFront,
+                                    ),
+                                    child: batch == null
+                                        ? null
+                                        : Stack(
+                                            children: [
+                                              Center(
+                                                child: Text(
+                                                  '${batch.remainingBugs}',
+                                                  style: TextStyle(
+                                                    color:
+                                                        color!.computeLuminance() >
+                                                            0.6
+                                                        ? Colors.black
+                                                        : Colors.white,
+                                                    fontSize: 18,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                              ),
+                                              if (!isQueueFront)
+                                                Positioned.fill(
+                                                  child: IgnorePointer(
+                                                    child: Container(
+                                                      decoration: BoxDecoration(
+                                                        color: const Color(
+                                                          0x66000000,
+                                                        ),
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                              5,
+                                                            ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                  ),
+                                );
+                                return isQueueFront
+                                    ? Draggable<_BugBatch>(
+                                        data: batch,
+                                        feedback: _BatchDragFeedback(
+                                          color: color,
+                                          remainingBugs: batch.remainingBugs,
+                                        ),
+                                        childWhenDragging: Opacity(
+                                          opacity: 0.35,
+                                          child: box,
+                                        ),
+                                        child: box,
+                                      )
+                                    : box;
+                              }),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  Positioned(
+                    bottom: 40,
+                    left: 50,
+                    right: 50,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _buildToolButton(
+                          _GameTool.bomb,
+                          'assets/icons/boom_icon.png',
+                        ),
+                        _buildToolButton(
+                          _GameTool.plus,
+                          'assets/icons/plus_icon.png',
+                        ),
+                        _buildToolButton(
+                          _GameTool.target,
+                          'assets/icons/strick_icon.png',
                         ),
                       ],
                     ),
                   ),
-                ),
+                  if (_isMenuVisible)
+                    Positioned.fill(
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Positioned(
+                            top: -MediaQuery.of(context).padding.top,
+                            left: 0,
+                            right: 0,
+                            bottom: -MediaQuery.of(context).padding.bottom,
+                            child: GestureDetector(
+                              onTap: _toggleGameMenu,
+                              child: Container(
+                                color: Colors.black.withValues(alpha: 0.68),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            top: 12,
+                            left: 12,
+                            child: _MenuSlideIn(
+                              begin: const Offset(-1.4, 0),
+                              reverse: !_isMenuOpen,
+                              child: CustomIconButton(
+                                size: 26,
+                                width: 48,
+                                height: 48,
+                                icon: Icons.close,
+                                onPressed: _toggleGameMenu,
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            top: 18,
+                            right: 16,
+                            child: _MenuSlideIn(
+                              begin: const Offset(1.4, 0),
+                              reverse: !_isMenuOpen,
+                              child: Row(
+                                children: [
+                                  GestureDetector(
+                                    onTap: _hearts == 0
+                                        ? _showHeartRefill
+                                        : null,
+                                    child: _MenuStat(
+                                      icon: Icons.favorite,
+                                      value: _hearts == 0
+                                          ? '0  ${_progress.rechargeTimeLabel ?? '0:00'}'
+                                          : '$_hearts',
+                                      color: const Color(0xFFFF5D5D),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 18),
+                                  _MenuStat(
+                                    icon: Icons.monetization_on,
+                                    value: '$_coins',
+                                    color: const Color(0xFFFFC700),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            right: 16,
+                            bottom: 24,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _MenuSlideIn(
+                                  begin: const Offset(1.4, 0),
+                                  reverse: !_isMenuOpen,
+                                  child: Tooltip(
+                                    message: _hearts > 0
+                                        ? 'Restart level - 1 heart'
+                                        : 'No hearts remaining',
+                                    child: CustomIconButton(
+                                      size: 26,
+                                      width: 52,
+                                      height: 52,
+                                      icon: Icons.refresh,
+                                      onPressed: _hearts > 0
+                                          ? _restartFromMenu
+                                          : () {},
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                _MenuSlideIn(
+                                  begin: const Offset(1.4, 0),
+                                  reverse: !_isMenuOpen,
+                                  child: Tooltip(
+                                    message: _isSoundMuted
+                                        ? 'Turn sound on'
+                                        : 'Mute sound effects',
+                                    child: CustomIconButton(
+                                      size: 26,
+                                      width: 52,
+                                      height: 52,
+                                      icon: _isSoundMuted
+                                          ? Icons.volume_off
+                                          : Icons.volume_up,
+                                      onPressed: _toggleSound,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                _MenuSlideIn(
+                                  begin: const Offset(1.4, 0),
+                                  reverse: !_isMenuOpen,
+                                  child: Tooltip(
+                                    message: _isMusicMuted
+                                        ? 'Turn music on'
+                                        : 'Mute music',
+                                    child: CustomIconButton(
+                                      size: 26,
+                                      width: 52,
+                                      height: 52,
+                                      icon: _isMusicMuted
+                                          ? Icons.music_off
+                                          : Icons.music_note,
+                                      onPressed: _toggleMusic,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
               ),
-
-              Positioned(
-                bottom: 40,
-                left: 50,
-                right: 50,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    AnimatedImageButton(
-                      width: 50,
-                      height: 50,
-
-                      imagePath: 'assets/icons/boom_icon.png',
-                      fit: BoxFit.cover,
-                      borderRadius: BorderRadius.circular(16),
-                      onPressed: () {},
-                    ),
-                    AnimatedImageButton(
-                      width: 50,
-                      height: 50,
-
-                      imagePath: 'assets/icons/plus_icon.png',
-                      fit: BoxFit.cover,
-                      borderRadius: BorderRadius.circular(16),
-                      onPressed: () {},
-                    ),
-                    AnimatedImageButton(
-                      width: 50,
-                      height: 50,
-
-                      imagePath: 'assets/icons/strick_icon.png',
-                      fit: BoxFit.cover,
-                      borderRadius: BorderRadius.circular(16),
-                      onPressed: () {},
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
+  }
+}
+
+class _ActiveToolPulse extends StatefulWidget {
+  const _ActiveToolPulse({required this.isActive, required this.child});
+
+  final bool isActive;
+  final Widget child;
+
+  @override
+  State<_ActiveToolPulse> createState() => _ActiveToolPulseState();
+}
+
+class _ActiveToolPulseState extends State<_ActiveToolPulse>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    );
+    _updateAnimation();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ActiveToolPulse oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive != widget.isActive) _updateAnimation();
+  }
+
+  void _updateAnimation() {
+    if (widget.isActive) {
+      _controller.repeat(reverse: true);
+    } else {
+      _controller
+        ..stop()
+        ..value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      child: widget.child,
+      builder: (context, child) {
+        return Transform.scale(
+          scale: 1 + (_controller.value * 0.08),
+          child: child,
+        );
+      },
+    );
+  }
+}
+
+class _MenuStat extends StatelessWidget {
+  const _MenuStat({
+    required this.icon,
+    required this.value,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8CF),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFFFC700), width: 3),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0xFFFF7A00),
+            offset: Offset(0, 4),
+            blurRadius: 0,
+          ),
+          BoxShadow(
+            color: Color(0xFF174A9C),
+            offset: Offset(0, 2),
+            blurRadius: 2,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.18),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, size: 15, color: color),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Color(0xFF3A2A5E),
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MenuSlideIn extends StatefulWidget {
+  const _MenuSlideIn({
+    required this.begin,
+    required this.reverse,
+    required this.child,
+  });
+
+  final Offset begin;
+  final bool reverse;
+  final Widget child;
+
+  @override
+  State<_MenuSlideIn> createState() => _MenuSlideInState();
+}
+
+class _MenuSlideInState extends State<_MenuSlideIn>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<Offset> _position;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 420),
+    );
+    _position = Tween<Offset>(
+      begin: widget.begin,
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutBack));
+    _controller.forward();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MenuSlideIn oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.reverse != widget.reverse) {
+      if (widget.reverse) {
+        _controller.reverse();
+      } else {
+        _controller.forward();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SlideTransition(position: _position, child: widget.child);
   }
 }
 
@@ -1043,21 +1767,20 @@ class _BugData {
   _BugData({
     required this.color,
     required this.batch,
-    required this.target,
+    required this.targets,
     required this.source,
     required this.route,
-    this.speedMultiplier = 1.0,
   });
 
   final Color color;
   final _BugBatch batch;
-  final _PixelData target;
+  final List<_PixelData> targets;
+  _PixelData get target => targets.first;
   final _GridPoint source;
   List<_GridPoint>? route;
   double progress = 0;
   _BugState state = _BugState.outbound;
   bool hasReturned = false;
-  final double speedMultiplier; // Variable speed per bug
 }
 
 enum _BugState { outbound, exploding }
@@ -1069,7 +1792,6 @@ class _BugBatch {
   final int totalBugs;
   int releasedBugs = 0;
   int completedBugs = 0;
-  double? spawnSpeedVariation; // Variable spawn speed per batch
 
   int get remainingBugs => totalBugs - releasedBugs;
   int get activeBugs => releasedBugs - completedBugs;
@@ -1156,8 +1878,8 @@ class _BoardPixelsPainter extends CustomPainter {
         Rect.fromLTWH(
           pixel.column * pixelWidth,
           pixel.row * pixelHeight,
-          pixelWidth + 0.5,
-          pixelHeight + 0.5,
+          pixelWidth + 1.5,
+          pixelHeight + 1.5,
         ),
         pixel.color,
       );
@@ -1166,16 +1888,9 @@ class _BoardPixelsPainter extends CustomPainter {
 
   void _paintBoomPixel(Canvas canvas, Rect rect, Color color) {
     final shortestSide = rect.shortestSide;
-    final cornerRadius = Radius.circular(shortestSide * 0.14);
     final dark = Color.lerp(color, Colors.black, 0.35)!;
     final light = Color.lerp(color, Colors.white, 0.25)!;
-    final outline = RRect.fromRectAndRadius(rect, cornerRadius);
-    final body = RRect.fromRectAndRadius(
-      rect.deflate(shortestSide * 0.08),
-      Radius.circular(shortestSide * 0.1),
-    );
-    canvas.drawRRect(outline, Paint()..color = dark);
-    canvas.drawRRect(body, Paint()..color = color);
+    canvas.drawRect(rect, Paint()..color = color);
     canvas.drawRect(
       Rect.fromLTWH(
         rect.left + shortestSide * 0.18,
@@ -1305,7 +2020,7 @@ class _MovingBug extends StatelessWidget {
               child: ColorFiltered(
                 colorFilter: ColorFilter.mode(bug.color, BlendMode.srcIn),
                 child: Image.asset(
-                  'assets/bugs/white.png',
+                  'assets/bugs/BugN.png',
                   width: bugSize,
                   height: bugSize,
                   fit: BoxFit.contain,
@@ -1368,6 +2083,124 @@ class _BugExplosion extends StatelessWidget {
           decoration: BoxDecoration(
             color: color.withValues(alpha: 1 - progress.clamp(0.0, 1.0)),
             shape: BoxShape.circle,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AnimatedBatchBox extends StatefulWidget {
+  const _AnimatedBatchBox({required this.child, this.isBeating = false});
+
+  final Widget child;
+  final bool isBeating;
+
+  @override
+  State<_AnimatedBatchBox> createState() => _AnimatedBatchBoxState();
+}
+
+class _AnimatedBatchBoxState extends State<_AnimatedBatchBox>
+    with TickerProviderStateMixin {
+  late final AnimationController _squeezeController;
+  late final AnimationController _beatController;
+
+  @override
+  void initState() {
+    super.initState();
+    _squeezeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    )..forward();
+    _beatController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    );
+    _updateBeatAnimation();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedBatchBox oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isBeating != widget.isBeating) {
+      _updateBeatAnimation();
+    }
+  }
+
+  void _updateBeatAnimation() {
+    if (widget.isBeating) {
+      _beatController.repeat(reverse: true);
+    } else {
+      _beatController
+        ..stop()
+        ..value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _squeezeController.dispose();
+    _beatController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([_squeezeController, _beatController]),
+      child: widget.child,
+      builder: (context, child) {
+        final squeeze = Tween<double>(begin: 0.68, end: 1).evaluate(
+          CurvedAnimation(parent: _squeezeController, curve: Curves.elasticOut),
+        );
+        final beat = 1 + (_beatController.value * 0.08);
+        return Transform.scale(scale: squeeze * beat, child: child);
+      },
+    );
+  }
+}
+
+class _BatchDragFeedback extends StatelessWidget {
+  const _BatchDragFeedback({required this.color, required this.remainingBugs});
+
+  final Color? color;
+  final int remainingBugs;
+
+  @override
+  Widget build(BuildContext context) {
+    final fill = color ?? const Color(0xFF79421F);
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        width: 58,
+        height: 58,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Color.lerp(fill, Colors.white, 0.18)!,
+              fill,
+              Color.lerp(fill, Colors.black, 0.12)!,
+            ],
+          ),
+          borderRadius: BorderRadius.circular(13),
+          border: Border.all(color: Colors.white, width: 3),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x77000000),
+              offset: Offset(0, 3),
+              blurRadius: 4,
+            ),
+          ],
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          '$remainingBugs',
+          style: TextStyle(
+            color: fill.computeLuminance() > 0.6 ? Colors.black : Colors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
           ),
         ),
       ),
